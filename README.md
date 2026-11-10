@@ -95,6 +95,38 @@ pip install -r requirements.txt   # only needed for live mode
 python triage_agent.py --mock     # or: python triage_agent.py (live, if ANTHROPIC_API_KEY is set)
 ```
 
+## Process intelligence
+
+`analytics/process_intelligence.py` treats ReqFlow's own audit trail (every
+requisition already records when it was created, when it was decided, and
+why) as a process event log, the way a process-mining tool would, and turns
+it into a proof-of-value-style summary:
+
+- **Process variants** -- the distinct paths a requisition takes
+  (straight-through auto-approval, manually approved after review, manually
+  rejected, still awaiting review), with counts, share of total, and
+  average cycle time per path.
+- **Open backlog, by original flag reason** -- what's currently piling up
+  in `PENDING_REVIEW` and why (amount over ceiling, vendor risk, budget),
+  useful for spotting where the policy's thresholds need tuning.
+- **A quantified business-value estimate** -- reviewer-hours and cost
+  avoided by auto-approval, from disclosed, swappable assumptions (assumed
+  manual-review minutes, assumed reviewer hourly cost) rather than invented
+  precision.
+
+It's a REST client, nothing more -- same relationship to the API that the
+triage agent has. No new endpoint or table; the data was always there.
+
+```bash
+cd analytics
+pip install -r requirements.txt   # only needed for --chart
+python process_intelligence.py                                    # console report
+python process_intelligence.py --out report.md --chart chart.png  # + files
+```
+
+`sample_report.md` / `sample_chart.png` are checked-in output from a small
+local demo run, so the report's shape is visible without running anything.
+
 ## Running it
 
 Requires Java 21 and Maven.
@@ -133,12 +165,13 @@ curl -X POST http://localhost:8080/api/requisitions/2/approve \
 mvn test
 ```
 
-21 tests: 9 service-layer unit tests covering every branch of the
+22 tests: 9 service-layer unit tests covering every branch of the
 auto-approval policy (ceiling, vendor risk, budget headroom, re-decision
-guard, unknown-vendor fast-fail), 3 persistence tests that deliberately
+guard, unknown-vendor fast-fail), 4 persistence tests that deliberately
 skip the test transaction wrapper to force a fresh read (these are what
-caught a real bug -- see below), and 9 MockMvc integration tests against
-the real H2-backed, Spring-Security-protected REST surface.
+caught a real bug -- see below, and include a dedicated test for the
+`@Version` optimistic-lock conflict), and 9 MockMvc integration tests
+against the real H2-backed, Spring-Security-protected REST surface.
 
 ## Architecture
 

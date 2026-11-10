@@ -6,21 +6,39 @@ triages the requisitions a policy engine can't clear on its own.
 
 ## Why this exists
 
-This project targets a specific gap: a Source-to-Pay procurement software
-company's "AI-Augmented Engineering" role requires Java/Spring Boot backend
-work and rewards familiarity with agent-based/LLM-assisted systems. Rather
-than retrofit an unrelated project, ReqFlow is a small, honestly-scoped
-project built to show both directly:
+ReqFlow was built for two specific job applications, not as a generic
+portfolio piece, and it's honest about both:
 
-- **The backend**: a real REST API with real business rules (auto-approval
-  thresholds, budget tracking, vendor risk), not a CRUD skeleton.
-- **The AI layer**: a genuine tool-use agent that calls the same REST
-  endpoints a human reviewer would, to decide the cases the policy engine
-  flags rather than resolves -- which is what "agentic AI across
-  Source-to-Pay" means in practice, scaled down to one workflow step.
+**Zycus's "AI-Augmented Engineering" trainee role** asks for Java/Spring
+Boot backend work and rewards familiarity with agent-based/LLM-assisted
+systems. The core project -- a real REST API with real business rules
+(auto-approval thresholds, budget tracking, vendor risk), not a CRUD
+skeleton, plus a genuine tool-use agent that calls the same endpoints a
+human reviewer would -- is built directly for that: "agentic AI across
+Source-to-Pay," scaled down to one workflow step.
 
-It's deliberately not a flagship-scale project. The scope matches what an
-entry-level JD actually asks for.
+**Celonis's Associate (AI) Solution Consultant / Value Engineer role**
+(the Orbit Program) is a different kind of ask: Celonis sells process
+mining -- finding out how a business process actually runs, not how it's
+assumed to run, from the data it leaves behind -- and a Value Engineer's
+job is to translate that technical finding into something a customer's
+business side will act on. A procurement approval workflow with a full
+audit trail is exactly the kind of process-mining-shaped problem Celonis's
+own customers bring them (several of Celonis's published case studies are
+procure-to-pay processes), so rather than build an unrelated second
+project, `analytics/process_intelligence.py` extends ReqFlow's own event
+log the same way a value engineer would approach a customer's existing
+system: find the real bottleneck (queue time vs. decision time), find
+where the process deviates from how it's supposed to run (the conformance
+check), and turn both into a number the business side cares about
+(reviewer-hours and cost avoided, at an honestly disclosed, swappable
+assumption). See "Process intelligence" below for what that actually
+does; it's deliberately plain about what it is and isn't -- a small,
+real demonstration of the habit of mind the role asks for, not a claim to
+have rebuilt Celonis's own platform.
+
+Both halves are deliberately small-scale. The scope matches what an
+entry-level role actually asks for, not a flagship project.
 
 ## Domain
 
@@ -115,9 +133,12 @@ python triage_agent.py --mock     # or: python triage_agent.py (live, if ANTHROP
 
 ## Process intelligence
 
-`analytics/process_intelligence.py` reads the `RequisitionEvent` activity
-log through the REST API the way a process-mining tool reads an event log,
-and turns it into a proof-of-value-style summary:
+This is the part built specifically for a role like Celonis's Value
+Engineer: `analytics/process_intelligence.py` reads the `RequisitionEvent`
+activity log through the REST API the way a process-mining tool reads an
+event log -- case, activity, timestamp -- and turns it into the kind of
+proof-of-value summary a value engineer would actually hand a customer
+after a first discovery pass over their data:
 
 - **True variant discovery** -- requisitions are grouped by their actual
   activity *sequence* (e.g. `SUBMITTED -> AUTO_APPROVED` vs. `SUBMITTED ->

@@ -1,0 +1,27 @@
+spring:
+  datasource:
+    # A fresh randomly-named in-memory DB per test ApplicationContext.
+    # Different test classes here use different Spring context
+    # configurations (plain @SpringBootTest vs @SpringBootTest +
+    # @AutoConfigureMockMvc), so Spring Test spins up more than one
+    # context in the same JVM; with a fixed db name and DB_CLOSE_DELAY=-1
+    # they'd share one H2 instance and the second context's data.sql
+    # would collide with rows the first already inserted.
+    url: jdbc:h2:mem:reqflow-test-${random.uuid};DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    defer-datasource-initialization: true
+  sql:
+    init:
+      mode: always
+
+reqflow:
+  policy:
+    auto-approval-ceiling: 50000.00
+    vendor-risk-ceiling: 70

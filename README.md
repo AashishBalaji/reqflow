@@ -51,7 +51,26 @@ A `PENDING_REVIEW` requisition is then decided exactly one of two ways:
 a human calls `POST /api/requisitions/{id}/approve` or `/reject`, or the
 triage agent (below) calls the identical endpoint. The audit trail doesn't
 distinguish how the call got made, by design -- `decidedBy` is just
-whoever made it.
+whoever made it. Manual `approve()` also commits budget if a line is
+tracked, so a human/agent override is recorded as real spend the same way
+an auto-approval is.
+
+## Auth
+
+Every write (`POST`) requires HTTP Basic auth; every `GET` is open, so the
+API stays easy to browse and the triage agent can always list pending
+requisitions. Dev credentials (`reviewer` / `reqflow-dev`) live in
+`application.yml` -- override with `REQFLOW_SECURITY_USERNAME` /
+`REQFLOW_SECURITY_PASSWORD` for anything beyond local use.
+
+## API responses
+
+Controllers return response DTOs (`VendorResponse`, `BudgetLineResponse`,
+`RequisitionResponse`), not the JPA entities directly -- so a persistence
+concern like `BudgetLine`'s `@Version` optimistic-lock column never leaks
+into the API, and `BudgetLineResponse` exposes `remaining` as a
+first-class field instead of making callers recompute
+`allocatedAmount - spentAmount` themselves.
 
 ## The AI triage agent
 
@@ -94,14 +113,16 @@ H2's console is at `/h2-console` (JDBC URL `jdbc:h2:mem:reqflow`).
 # list everything pending review
 curl http://localhost:8080/api/requisitions?status=PENDING_REVIEW
 
-# create one (auto-approves or flags depending on the policy)
+# create one (auto-approves or flags depending on the policy) -- POSTs need auth
 curl -X POST http://localhost:8080/api/requisitions \
+  -u reviewer:reqflow-dev \
   -H 'Content-Type: application/json' \
   -d '{"requesterName":"Jane Doe","department":"Engineering","vendorId":2,
        "category":"it_equipment","amount":1200.00,"justification":"replacement monitors"}'
 
 # approve a flagged one
 curl -X POST http://localhost:8080/api/requisitions/2/approve \
+  -u reviewer:reqflow-dev \
   -H 'Content-Type: application/json' \
   -d '{"decidedBy":"jane.doe","reason":"reviewed, acceptable risk for this vendor relationship"}'
 ```
@@ -112,10 +133,12 @@ curl -X POST http://localhost:8080/api/requisitions/2/approve \
 mvn test
 ```
 
-15 tests: 9 service-layer unit tests covering every branch of the
+21 tests: 9 service-layer unit tests covering every branch of the
 auto-approval policy (ceiling, vendor risk, budget headroom, re-decision
-guard, unknown-vendor fast-fail) and 6 MockMvc integration tests against
-the real H2-backed REST surface.
+guard, unknown-vendor fast-fail), 3 persistence tests that deliberately
+skip the test transaction wrapper to force a fresh read (these are what
+caught a real bug -- see below), and 9 MockMvc integration tests against
+the real H2-backed, Spring-Security-protected REST surface.
 
 ## Architecture
 
@@ -142,3 +165,15 @@ the policy by hand, then unit and integration tests, then the agent --
 tested live against the running API in mock mode before being documented
 here. That iterative, AI-assisted build process is itself the kind of
 "AI-aware development" workflow the target role is asking for.
+
+A follow-up review pass (three parallel reviewers reading the actual code,
+not a rubber stamp) caught a real bug: the auto-approval policy mutated a
+`BudgetLine`'s spent amount without the save ever reaching the database --
+masked by a test that wrapped everything in one transaction. Fixed with
+`@Transactional` + an explicit save, a `@Version` column so two
+concurrent requisitions against the same budget line can't both slip
+past the headroom check, a consistency fix so manual approval commits
+budget the same way auto-approval does, and regression tests structured
+specifically to not hide the bug the way the original one did. The same
+pass flagged (and this iteration fixed) two scope gaps: response DTOs
+instead of returning JPA entities, and HTTP Basic auth on every write.

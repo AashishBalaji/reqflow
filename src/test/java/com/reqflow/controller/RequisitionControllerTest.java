@@ -99,4 +99,40 @@ class RequisitionControllerTest {
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.status").value(404));
     }
+
+    @Test
+    void responsesCarryTheActivityLog() throws Exception {
+        // requisition id 1 is seeded AUTO_APPROVED in data.sql, with matching
+        // SUBMITTED + AUTO_APPROVED seed events.
+        mockMvc.perform(get("/api/requisitions/1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.events", hasSize(2)))
+                .andExpect(jsonPath("$.events[0].activity").value("SUBMITTED"))
+                .andExpect(jsonPath("$.events[1].activity").value("AUTO_APPROVED"));
+    }
+
+    @Test
+    void openEndpointRecordsAnEventWithoutDeciding() throws Exception {
+        // requisition id 2 is seeded PENDING_REVIEW with 2 seed events
+        // (SUBMITTED, FLAGGED_FOR_REVIEW) in data.sql, so opening it adds a
+        // third at index 2.
+        mockMvc.perform(post("/api/requisitions/2/open").with(httpBasic("reviewer", "reqflow-dev")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING_REVIEW"))
+                .andExpect(jsonPath("$.events", hasSize(3)))
+                .andExpect(jsonPath("$.events[2].activity").value("OPENED_FOR_REVIEW"));
+    }
+
+    @Test
+    void openWithoutAuthIsRejected() throws Exception {
+        mockMvc.perform(post("/api/requisitions/2/open"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void openingAnAlreadyDecidedRequisitionIsAConflict() throws Exception {
+        // requisition id 1 is seeded AUTO_APPROVED, not PENDING_REVIEW.
+        mockMvc.perform(post("/api/requisitions/1/open").with(httpBasic("reviewer", "reqflow-dev")))
+                .andExpect(status().isConflict());
+    }
 }

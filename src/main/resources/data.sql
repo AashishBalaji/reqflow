@@ -29,3 +29,17 @@ values
    'PENDING_REVIEW', null, 'Amount 15000.00 exceeds remaining budget of 8000.00 for Facilities/facilities FY2026', CURRENT_TIMESTAMP),
   ('Sam Okafor', 'Operations', 1, 'office_supplies', 62000.00, 'Bulk annual stationery order',
    'PENDING_REVIEW', null, 'Amount 62000.00 exceeds auto-approval ceiling of 50000.00', CURRENT_TIMESTAMP);
+
+-- Matching activity-log events for the four seeded requisitions above (ids
+-- 1-4 in insertion order), so the seed data has a real event log too, not
+-- just the two summary timestamps -- otherwise every demo run would show
+-- the seeded rows as "no event log" next to freshly-created ones.
+insert into requisition_events (requisition_id, activity, detail, occurred_at) values
+  (1, 'SUBMITTED', null, CURRENT_TIMESTAMP),
+  (1, 'AUTO_APPROVED', 'Within ceiling, budget, and vendor-risk thresholds', CURRENT_TIMESTAMP),
+  (2, 'SUBMITTED', null, CURRENT_TIMESTAMP),
+  (2, 'FLAGGED_FOR_REVIEW', 'Vendor ''Horizon Consulting Group'' risk score 81 is at or above the ceiling of 70', CURRENT_TIMESTAMP),
+  (3, 'SUBMITTED', null, CURRENT_TIMESTAMP),
+  (3, 'FLAGGED_FOR_REVIEW', 'Amount 15000.00 exceeds remaining budget of 8000.00 for Facilities/facilities FY2026', CURRENT_TIMESTAMP),
+  (4, 'SUBMITTED', null, CURRENT_TIMESTAMP),
+  (4, 'FLAGGED_FOR_REVIEW', 'Amount 62000.00 exceeds auto-approval ceiling of 50000.00', CURRENT_TIMESTAMP);

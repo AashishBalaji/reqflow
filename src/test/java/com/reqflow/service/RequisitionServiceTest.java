@@ -5,6 +5,7 @@ import com.reqflow.dto.CreateBudgetLineRequest;
 import com.reqflow.dto.CreateRequisitionRequest;
 import com.reqflow.dto.CreateVendorRequest;
 import com.reqflow.model.PurchaseRequisition;
+import com.reqflow.model.RequisitionEvent;
 import com.reqflow.model.RequisitionStatus;
 import com.reqflow.model.Vendor;
 import com.reqflow.repository.BudgetLineRepository;
@@ -19,6 +20,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -36,6 +38,7 @@ class RequisitionServiceTest {
     @Autowired private RequisitionService requisitionService;
     @Autowired private VendorService vendorService;
     @Autowired private BudgetLineService budgetLineService;
+    @Autowired private RequisitionEventService requisitionEventService;
     @Autowired private VendorRepository vendorRepository;
     @Autowired private BudgetLineRepository budgetLineRepository;
     @Autowired private RequisitionRepository requisitionRepository;
@@ -145,5 +148,83 @@ class RequisitionServiceTest {
         assertThrows(com.reqflow.exception.ResourceNotFoundException.class, () ->
                 requisitionService.create(new CreateRequisitionRequest(
                         "Ivan", "Engineering", 9999L, "office_supplies", new BigDecimal("500.00"), "supplies")));
+    }
+
+    @Test
+    void autoApprovalRecordsSubmittedThenAutoApprovedEvents() {
+        PurchaseRequisition req = requisitionService.create(new CreateRequisitionRequest(
+                "Judy", "Engineering", goodVendorId, "office_supplies", new BigDecimal("500.00"), "paper"));
+
+        List<RequisitionEvent> events = requisitionEventService.findForRequisition(req.getId());
+        assertEquals(2, events.size());
+        assertEquals("SUBMITTED", events.get(0).getActivity());
+        assertEquals("AUTO_APPROVED", events.get(1).getActivity());
+        assertEquals(req.getDecisionReason(), events.get(1).getDetail());
+    }
+
+    @Test
+    void flaggingRecordsSubmittedThenFlaggedEventWithTheReason() {
+        PurchaseRequisition req = requisitionService.create(new CreateRequisitionRequest(
+                "Kevin", "Engineering", riskyVendorId, "office_supplies", new BigDecimal("500.00"), "supplies"));
+
+        List<RequisitionEvent> events = requisitionEventService.findForRequisition(req.getId());
+        assertEquals(2, events.size());
+        assertEquals("SUBMITTED", events.get(0).getActivity());
+        assertEquals("FLAGGED_FOR_REVIEW", events.get(1).getActivity());
+        assertTrue(events.get(1).getDetail().contains("risk score 95"));
+    }
+
+    @Test
+    void flaggedReasonSurvivesOnTheEventLogAfterTheFinalDecisionOverwritesIt() {
+        // decisionReason on the requisition itself gets overwritten by
+        // decide() -- the whole reason this event log exists. Confirm the
+        // original flag reason is still readable from the event, even
+        // after approve() has moved the requisition past PENDING_REVIEW
+        // and replaced decisionReason with the approver's own text.
+        PurchaseRequisition flagged = requisitionService.create(new CreateRequisitionRequest(
+                "Laura", "Engineering", riskyVendorId, "office_supplies", new BigDecimal("500.00"), "supplies"));
+        String originalFlagReason = flagged.getDecisionReason();
+
+        requisitionService.approve(flagged.getId(), "someone", "approved on manual review");
+
+        List<RequisitionEvent> events = requisitionEventService.findForRequisition(flagged.getId());
+        assertEquals(originalFlagReason, events.get(1).getDetail());
+        assertEquals("APPROVED", events.get(2).getActivity());
+        assertEquals("approved on manual review", events.get(2).getDetail());
+    }
+
+    @Test
+    void openForReviewRecordsAnEventWithoutChangingStatus() {
+        PurchaseRequisition flagged = requisitionService.create(new CreateRequisitionRequest(
+                "Mallory", "Engineering", riskyVendorId, "office_supplies", new BigDecimal("500.00"), "supplies"));
+
+        PurchaseRequisition opened = requisitionService.openForReview(flagged.getId());
+
+        assertEquals(RequisitionStatus.PENDING_REVIEW, opened.getStatus());
+        List<RequisitionEvent> events = requisitionEventService.findForRequisition(flagged.getId());
+        assertEquals(3, events.size());
+        assertEquals("OPENED_FOR_REVIEW", events.get(2).getActivity());
+    }
+
+    @Test
+    void cannotOpenAnAlreadyDecidedRequisition() {
+        PurchaseRequisition approved = requisitionService.create(new CreateRequisitionRequest(
+                "Niaj", "Engineering", goodVendorId, "office_supplies", new BigDecimal("500.00"), "supplies"));
+        assertEquals(RequisitionStatus.AUTO_APPROVED, approved.getStatus());
+
+        assertThrows(IllegalStateException.class, () -> requisitionService.openForReview(approved.getId()));
+    }
+
+    @Test
+    void rejectRecordsARejectedEventWithTheGivenReason() {
+        PurchaseRequisition flagged = requisitionService.create(new CreateRequisitionRequest(
+                "Oscar", "Engineering", riskyVendorId, "office_supplies", new BigDecimal("500.00"), "supplies"));
+
+        requisitionService.reject(flagged.getId(), "someone", "risk too high even on review");
+
+        List<RequisitionEvent> events = requisitionEventService.findForRequisition(flagged.getId());
+        RequisitionEvent last = events.get(events.size() - 1);
+        assertEquals("REJECTED", last.getActivity());
+        assertEquals("risk too high even on review", last.getDetail());
     }
 }

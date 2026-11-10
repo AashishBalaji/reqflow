@@ -1,30 +1,28 @@
 # ReqFlow Process Intelligence -- Proof-of-Value Summary
 
-> Sample output from a small local demo run (a handful of seeded and
-> manually-decided requisitions created seconds apart), checked in to show
-> the report's shape. Run against real usage, cycle times would reflect
-> real review latency -- minutes to days, not fractions of a minute -- and
-> the at-scale projection below shows how the same rate reads at a
-> disclosed, hypothetical production volume.
+> Sample output from a small local demo run (6 hand-created requisitions, including a real event log walked through the agent's submit -> open -> decide flow), checked in to show the report's shape -- variants, the queue/decision split, and the flag-reason breakdown. Run against real usage, the same fields populate at whatever volume and cadence the process actually runs at, and the at-scale projection below shows how the same rate reads at a disclosed, hypothetical production volume.
 
-Scope: 5 requisitions currently in the system.
+Scope: 6 requisitions currently in the system.
 
-## Decision paths
+## Variants (actual activity sequences)
 
-| Decision path | Count | Share | Avg cycle time |
-|---|---:|---:|---:|
-| Straight-through (auto-approved) | 2 | 40% | 0.0 min |
-| Awaiting review (open) | 1 | 20% | -- |
-| Manually approved after review | 1 | 20% | 0.4 min |
-| Manually rejected after review | 1 | 20% | 0.4 min |
+| Variant | Count | Share | Avg total | Avg queue | Avg decision |
+|---|---:|---:|---:|---:|---:|
+| SUBMITTED → AUTO_APPROVED | 2 | 33% | 0.0 min | -- | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → APPROVED | 2 | 33% | 0.4 min | 0.4 min | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → REJECTED | 1 | 17% | 0.4 min | 0.3 min | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW | 1 | 17% | -- | -- | -- |
 
-*These are decision-path groupings by terminal status, not full process-mining variant discovery over a multi-activity event sequence -- ReqFlow's audit trail records two timestamps per case (created, decided), not intermediate events like "opened for review". A richer log capturing that would let cycle time decompose into queue-time vs. decision-time and support true variant discovery.*
+*Queue/decision only populate for cases with an explicit `OPENED_FOR_REVIEW` event -- without one, only the total is reportable, disclosed rather than interpolated.*
 
-## Open backlog, by original flag reason
+## All flagged cases, by original flag reason (decided or still open)
 
 | Reason | Count |
 |---|---:|
-| Amount over auto-approval ceiling | 1 |
+| Amount over auto-approval ceiling | 3 |
+| Budget headroom insufficient or untracked | 1 |
+
+*1 case(s) still awaiting a decision; average age 3.0 min.*
 
 ## Estimated business value
 
@@ -34,6 +32,6 @@ Scope: 5 requisitions currently in the system.
 
 *Assumptions are disclosed and swappable -- a real engagement would substitute the customer's own review-time and labor-cost figures.*
 
-At the same **40%** auto-approval rate but a production volume of **2,000/month** (disclosed, hypothetical): **~800** auto-approved, **~106.7 reviewer-hours** and **~$2,667/month** avoided.
+At the same **33%** auto-approval rate but a production volume of **2,000/month** (disclosed, hypothetical): **~667** auto-approved, **~88.9 reviewer-hours** and **~$2,223/month** avoided.
 
-![Decision-path and cycle-time chart](sample_chart.png)
+![Variant and cycle-time chart](sample_chart.png)

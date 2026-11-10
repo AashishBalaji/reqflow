@@ -29,6 +29,11 @@ entry-level JD actually asks for.
   `remaining()` tracking what's left after committed spend.
 - **PurchaseRequisition** -- a request to spend, with a full audit trail:
   who decided it (human name, or `agent:claude-triage-v1`), when, and why.
+- **RequisitionEvent** -- an append-only activity log, one row per lifecycle
+  transition (`SUBMITTED`, `AUTO_APPROVED`, `FLAGGED_FOR_REVIEW`,
+  `OPENED_FOR_REVIEW`, `APPROVED`, `REJECTED`), each with its own permanent
+  `detail` text. This is what turns the audit trail into a real process
+  event log -- see "Process intelligence" below.
 
 ## The approval policy
 
@@ -55,6 +60,14 @@ whoever made it. Manual `approve()` also commits budget if a line is
 tracked, so a human/agent override is recorded as real spend the same way
 an auto-approval is.
 
+Before deciding, a reviewer (human or agent) can call
+`POST /api/requisitions/{id}/open` -- a non-deciding transition that
+records `OPENED_FOR_REVIEW` without changing the requisition's status. It
+exists purely to give the event log (and therefore the analytics below) a
+real split between *queue time* (flagged -> picked up) and *decision time*
+(picked up -> decided), instead of one undifferentiated lump. The triage
+agent calls it automatically before every decision.
+
 ## Auth
 
 Every write (`POST`) requires HTTP Basic auth; every `GET` is open, so the
@@ -70,15 +83,20 @@ Controllers return response DTOs (`VendorResponse`, `BudgetLineResponse`,
 concern like `BudgetLine`'s `@Version` optimistic-lock column never leaks
 into the API, and `BudgetLineResponse` exposes `remaining` as a
 first-class field instead of making callers recompute
-`allocatedAmount - spentAmount` themselves.
+`allocatedAmount - spentAmount` themselves. `RequisitionResponse` also
+carries the requisition's full `events` list (`RequisitionEventResponse`:
+activity, detail, occurredAt) -- the event log isn't a side table nobody
+reads, it's on every response the same surface the agent and the analytics
+script both already call.
 
 ## The AI triage agent
 
 `agent/triage_agent.py` polls `GET /api/requisitions?status=PENDING_REVIEW`
-and, for each one, decides to approve or reject by calling the same
-`approve`/`reject` endpoints a human reviewer uses. There is no separate
-"agent API" -- the agent is just another caller of the REST surface, wired
-up as Anthropic tool-use functions (`get_vendor`, `approve_requisition`,
+and, for each one, calls `POST .../open` (recording `OPENED_FOR_REVIEW`)
+before deciding to approve or reject by calling the same `approve`/`reject`
+endpoints a human reviewer uses. There is no separate "agent API" -- the
+agent is just another caller of the REST surface, wired up as Anthropic
+tool-use functions (`get_vendor`, `approve_requisition`,
 `reject_requisition`).
 
 Two modes, same code path:
@@ -97,25 +115,37 @@ python triage_agent.py --mock     # or: python triage_agent.py (live, if ANTHROP
 
 ## Process intelligence
 
-`analytics/process_intelligence.py` treats ReqFlow's own audit trail (every
-requisition already records when it was created, when it was decided, and
-why) as a process event log, the way a process-mining tool would, and turns
-it into a proof-of-value-style summary:
+`analytics/process_intelligence.py` reads the `RequisitionEvent` activity
+log through the REST API the way a process-mining tool reads an event log,
+and turns it into a proof-of-value-style summary:
 
-- **Process variants** -- the distinct paths a requisition takes
-  (straight-through auto-approval, manually approved after review, manually
-  rejected, still awaiting review), with counts, share of total, and
-  average cycle time per path.
-- **Open backlog, by original flag reason** -- what's currently piling up
-  in `PENDING_REVIEW` and why (amount over ceiling, vendor risk, budget),
-  useful for spotting where the policy's thresholds need tuning.
-- **A quantified business-value estimate** -- reviewer-hours and cost
-  avoided by auto-approval, from disclosed, swappable assumptions (assumed
-  manual-review minutes, assumed reviewer hourly cost) rather than invented
-  precision.
+- **True variant discovery** -- requisitions are grouped by their actual
+  activity *sequence* (e.g. `SUBMITTED -> AUTO_APPROVED` vs. `SUBMITTED ->
+  FLAGGED_FOR_REVIEW -> OPENED_FOR_REVIEW -> APPROVED`), not just their
+  terminal status. An earlier version of this script only had two
+  timestamps to work with and grouped by status, which a round of
+  structured review correctly flagged as not a real variant analysis; the
+  event log is the fix, not a renaming of the same limitation.
+- **Decomposed cycle time** -- when a case was explicitly opened for review
+  (`POST .../open`, which both the triage agent and a real reviewer UI
+  would call before deciding), total cycle time splits into *queue time*
+  (flagged -> picked up) and *decision time* (picked up -> decided).
+  Without an open event, only the lump total is available -- disclosed,
+  not interpolated.
+- **A durable flag-reason breakdown covering every flagged case** --
+  because each `FLAGGED_FOR_REVIEW` event keeps its own detail text
+  permanently, the original flag reason survives even after a later
+  decision overwrites the requisition's own `decisionReason` field, so the
+  breakdown isn't limited to the still-open backlog the way it would be
+  reading `decisionReason` alone.
+- **A quantified, disclosed-assumption business-value estimate** --
+  reviewer-hours and cost avoided by auto-approval, plus an at-scale
+  projection so a small demo run's absolute numbers aren't mistaken for the
+  finding itself.
 
 It's a REST client, nothing more -- same relationship to the API that the
-triage agent has. No new endpoint or table; the data was always there.
+triage agent has. No new endpoint was added for this script specifically;
+it just reads the event log the API already returns on every requisition.
 
 ```bash
 cd analytics
@@ -165,13 +195,18 @@ curl -X POST http://localhost:8080/api/requisitions/2/approve \
 mvn test
 ```
 
-22 tests: 9 service-layer unit tests covering every branch of the
+32 tests: 9 service-layer unit tests covering every branch of the
 auto-approval policy (ceiling, vendor risk, budget headroom, re-decision
 guard, unknown-vendor fast-fail), 4 persistence tests that deliberately
 skip the test transaction wrapper to force a fresh read (these are what
 caught a real bug -- see below, and include a dedicated test for the
-`@Version` optimistic-lock conflict), and 9 MockMvc integration tests
-against the real H2-backed, Spring-Security-protected REST surface.
+`@Version` optimistic-lock conflict), 6 service-layer tests covering the
+`RequisitionEvent` log and `openForReview` (including one that specifically
+proves the original flag reason survives on the event log after a later
+decision overwrites `decisionReason` -- the whole reason the event log
+exists), and 13 MockMvc integration tests against the real H2-backed,
+Spring-Security-protected REST surface, including the `/open` endpoint and
+the event log showing up in `RequisitionResponse`.
 
 ## Architecture
 
@@ -184,9 +219,15 @@ Client / Human Reviewer          AI Triage Agent (agent/triage_agent.py)
                         |
             RequisitionService (service/)
              - auto-approval policy
-             - approve / reject
-                        |
-         JPA repositories (repository/) -> H2
+             - approve / reject / openForReview
+                        |              \
+         JPA repositories (repository/)  -> RequisitionEventService
+                        |                       (append-only activity log)
+                        v                       |
+                       H2  <---------------------
+                                                 |
+                              analytics/process_intelligence.py
+                              (reads the event log via the same REST API)
 ```
 
 ## Build process

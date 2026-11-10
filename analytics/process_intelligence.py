@@ -1,25 +1,37 @@
 """
-Process intelligence over ReqFlow's own audit trail.
+Process intelligence over ReqFlow's own event log.
 
-ReqFlow already records, for every requisition, when it was created, when
-(and whether) it was decided, and why -- a timestamped event log by any
-other name. This script reads that log the way a process-mining tool
-would: it groups requisitions into the decision paths they took through
-the approval process, measures how long each path actually takes, and
-turns the straight-through / manual-review split into a quantified
-business-value number -- the kind of proof-of-value deliverable a
-procurement process-intelligence engagement is built to produce.
+Every requisition now carries a real activity log (RequisitionEvent, one
+row per state transition: SUBMITTED, AUTO_APPROVED, FLAGGED_FOR_REVIEW,
+OPENED_FOR_REVIEW, APPROVED, REJECTED), not just the two summary
+timestamps (createdAt/decidedAt) the first version of this script was
+limited to. This script reads that log the way a process-mining tool
+would:
 
-Honest about its own limits: with only two recorded timestamps per case
-(created, decided), a "decision path" here is really a terminal-status
-grouping, not full process-mining variant discovery over a multi-activity
-event sequence -- and cycle time is total elapsed time, not decomposed
-into queue-time vs. decision-time. A richer log (e.g. an "opened for
-review" event) would support both; see the note each report prints.
+- **True variant discovery** -- requisitions are grouped by their actual
+  activity sequence (e.g. "SUBMITTED -> AUTO_APPROVED" vs. "SUBMITTED ->
+  FLAGGED_FOR_REVIEW -> OPENED_FOR_REVIEW -> APPROVED"), not just their
+  terminal status.
+- **Decomposed cycle time** -- when a case was explicitly opened for
+  review (POST /api/requisitions/{id}/open, which both a human UI and the
+  triage agent call before deciding), total cycle time splits into
+  queue-time (flagged -> picked up) and decision-time (picked up ->
+  decided). Without an open event, only the lump total is available --
+  disclosed, not hidden.
+- **A durable flag-reason breakdown** -- because each FLAGGED_FOR_REVIEW
+  event keeps its own detail text, the original flag reason survives even
+  after a later decision overwrites the requisition's own decisionReason
+  field. The breakdown below covers every flagged case, not just the
+  still-open ones the two-timestamp version was limited to.
+- **A quantified, disclosed-assumption business-value estimate** --
+  reviewer-hours and cost avoided by auto-approval, plus an at-scale
+  projection so a small demo run's absolute numbers aren't mistaken for
+  the finding itself.
 
 It is a client of the REST API, nothing more -- the same relationship the
-AI triage agent (agent/triage_agent.py) has to ReqFlow. No new endpoint,
-no new table: the data was always there, this just reads it differently.
+AI triage agent (agent/triage_agent.py) has to ReqFlow. No new endpoint
+was added for this script specifically; it just reads the event log the
+API already returns on every requisition.
 
 Usage:
     python process_intelligence.py [--base-url http://localhost:8080]
@@ -47,6 +59,10 @@ _FRACTIONAL_SECONDS = re.compile(r"(\.\d{6})\d*(?=(Z|[+-]\d{2}:?\d{2})?$)")
 
 DEFAULT_BASE_URL = "http://localhost:8080"
 
+TERMINAL_ACTIVITIES = {"AUTO_APPROVED", "APPROVED", "REJECTED"}
+SEQUENCE_SEPARATOR = " → "  # "->"
+NO_EVENT_LOG_LABEL = "Unknown sequence (no event log)"
+
 # Disclosed assumptions behind the ROI estimate below -- a real engagement
 # would pull these from the customer's own numbers; here they stand in for
 # "a plausible mid-market procurement review."
@@ -60,24 +76,12 @@ ASSUMED_REVIEWER_HOURLY_COST_USD = 25.0
 # finding rather than a small sample.
 ASSUMED_MONTHLY_VOLUME_AT_SCALE = 2000
 
-LIMITATION_NOTE = (
-    "These are decision-path groupings by terminal status, not full "
-    "process-mining variant discovery over a multi-activity event "
-    "sequence -- ReqFlow's audit trail records two timestamps per case "
-    "(created, decided), not intermediate events like \"opened for "
-    "review\". A richer log capturing that would let cycle time "
-    "decompose into queue-time vs. decision-time and support true "
-    "variant discovery."
-)
-
-# Keyword probes used only to bucket an *open* (still-pending) requisition's
-# flag reason into a coarse category for the backlog breakdown below. This
-# only works for PENDING_REVIEW cases: once a human or the agent decides a
-# requisition, decide() overwrites decisionReason with their own text, so
-# the original flag category isn't recoverable after the fact -- a real
-# limitation of this data model, noted in the report rather than papered
-# over.
-BACKLOG_CATEGORY_PROBES = [
+# Keyword probes used to bucket a FLAGGED_FOR_REVIEW event's own detail text
+# into a coarse category. Unlike the previous version of this script, this
+# now applies to every flagged case (decided or not): the category comes
+# from the event's own permanent detail text, not from the requisition's
+# current decisionReason, which a later decision overwrites.
+FLAG_CATEGORY_PROBES = [
     ("ceiling", "Amount over auto-approval ceiling"),
     ("risk score", "Vendor risk too high / inactive"),
     ("budget", "Budget headroom insufficient or untracked"),
@@ -99,81 +103,141 @@ def _parse_instant(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value)
 
 
+def _sorted_events(req: dict) -> list[dict]:
+    # Stable sort on occurredAt ALONE. Sibling events written in the same
+    # service call (e.g. SUBMITTED then AUTO_APPROVED) can land on the exact
+    # same millisecond, and the API already returns them in true causal
+    # order (ORDER BY occurred_at, id). A tuple key that adds "activity" as
+    # a tiebreaker would re-sort those ties alphabetically -- AUTO_APPROVED
+    # before SUBMITTED -- which silently scrambles the sequence. Python's
+    # sort is stable, so sorting on occurredAt alone preserves the API's
+    # already-correct order on every tie.
+    events = req.get("events") or []
+    return sorted(events, key=lambda e: _parse_instant(e["occurredAt"]) or datetime.min)
+
+
+def _minutes_between(a: datetime | None, b: datetime | None) -> float | None:
+    """Minutes from a to b, or None if either is missing or the result
+    would be negative (bad data/clock skew) -- a negative duration
+    averaged in silently would be a textbook "quietly wrong number" in a
+    report meant to be taken at face value."""
+    if a is None or b is None:
+        return None
+    minutes = (b - a).total_seconds() / 60.0
+    return minutes if minutes >= 0 else None
+
+
 @dataclass
-class VariantStats:
-    label: str
-    count: int = 0
-    cycle_minutes: list[float] = field(default_factory=list)
-
-    @property
-    def avg_cycle_minutes(self) -> float | None:
-        return statistics.mean(self.cycle_minutes) if self.cycle_minutes else None
-
-
-def classify_variant(req: dict) -> str:
-    status = req["status"]
-    if status == "AUTO_APPROVED":
-        return "Straight-through (auto-approved)"
-    if status == "APPROVED":
-        return "Manually approved after review"
-    if status == "REJECTED":
-        return "Manually rejected after review"
-    return "Awaiting review (open)"
+class CaseProfile:
+    """What this script actually needs out of one requisition's event log,
+    computed once and reused by every section of the report."""
+    sequence: str
+    is_decided: bool
+    flag_category: str | None       # None if never flagged (straight-through)
+    total_minutes: float | None     # SUBMITTED -> terminal event
+    queue_minutes: float | None     # SUBMITTED -> OPENED_FOR_REVIEW (None if never opened)
+    decision_minutes: float | None  # OPENED_FOR_REVIEW -> terminal (None if never opened)
+    backlog_age_minutes: float | None  # now - last event, only set when not yet decided
+    bad_timestamps: bool            # decided, but a duration came out negative
 
 
-def classify_backlog_reason(req: dict) -> str:
-    reason = (req.get("decisionReason") or "").lower()
-    for probe, label in BACKLOG_CATEGORY_PROBES:
-        if probe in reason:
+def profile_case(req: dict, now: datetime) -> CaseProfile:
+    events = _sorted_events(req)
+    if not events:
+        # Legacy/fallback path: no event log at all. Shouldn't happen for
+        # anything created through RequisitionService, but a direct SQL
+        # insert (or an older API version) could still produce this.
+        return CaseProfile(NO_EVENT_LOG_LABEL, req.get("decidedAt") is not None,
+                            None, None, None, None, None, False)
+
+    sequence = SEQUENCE_SEPARATOR.join(e["activity"] for e in events)
+    submitted_at = _parse_instant(events[0]["occurredAt"])
+    opened_event = next((e for e in events if e["activity"] == "OPENED_FOR_REVIEW"), None)
+    opened_at = _parse_instant(opened_event["occurredAt"]) if opened_event else None
+    terminal_event = events[-1] if events[-1]["activity"] in TERMINAL_ACTIVITIES else None
+    terminal_at = _parse_instant(terminal_event["occurredAt"]) if terminal_event else None
+
+    flagged_event = next((e for e in events if e["activity"] == "FLAGGED_FOR_REVIEW"), None)
+    flag_category = classify_flag_reason(flagged_event["detail"]) if flagged_event else None
+
+    total_minutes = _minutes_between(submitted_at, terminal_at) if terminal_event else None
+    if opened_at is not None and terminal_at is not None:
+        queue_minutes = _minutes_between(submitted_at, opened_at)
+        decision_minutes = _minutes_between(opened_at, terminal_at)
+    else:
+        queue_minutes = None
+        decision_minutes = total_minutes  # no open event: can't split, only the lump sum
+
+    bad_timestamps = terminal_event is not None and total_minutes is None
+    backlog_age_minutes = None
+    if terminal_event is None:
+        last_at = _parse_instant(events[-1]["occurredAt"])
+        if last_at is not None:
+            backlog_age_minutes = max((now - last_at).total_seconds() / 60.0, 0.0)
+
+    return CaseProfile(sequence, terminal_event is not None, flag_category,
+                        total_minutes, queue_minutes, decision_minutes,
+                        backlog_age_minutes, bad_timestamps)
+
+
+def classify_flag_reason(detail: str | None) -> str:
+    text = (detail or "").lower()
+    for probe, label in FLAG_CATEGORY_PROBES:
+        if probe in text:
             return label
     return "Other / unclassified"
 
 
-def cycle_minutes(req: dict) -> float | None:
-    """None if undecided, or if the timestamps are unusable (clock skew or
-    bad data producing decidedAt before createdAt) -- a negative duration
-    averaged in silently would be a textbook "quietly wrong number" in a
-    report meant to be taken at face value."""
-    created = _parse_instant(req.get("createdAt"))
-    decided = _parse_instant(req.get("decidedAt"))
-    if created is None or decided is None:
-        return None
-    minutes = (decided - created).total_seconds() / 60.0
-    return minutes if minutes >= 0 else None
+@dataclass
+class VariantStats:
+    label: str
+    count: int = 0
+    total_minutes: list[float] = field(default_factory=list)
+    queue_minutes: list[float] = field(default_factory=list)
+    decision_minutes: list[float] = field(default_factory=list)
+
+    @property
+    def avg_total_minutes(self) -> float | None:
+        return statistics.mean(self.total_minutes) if self.total_minutes else None
+
+    @property
+    def avg_queue_minutes(self) -> float | None:
+        return statistics.mean(self.queue_minutes) if self.queue_minutes else None
+
+    @property
+    def avg_decision_minutes(self) -> float | None:
+        return statistics.mean(self.decision_minutes) if self.decision_minutes else None
 
 
 def build_report(requisitions: list[dict]) -> dict:
-    variants: dict[str, VariantStats] = {}
-    backlog_by_reason: dict[str, int] = {}
     now = datetime.now(timezone.utc)
+    variants: dict[str, VariantStats] = {}
+    flag_reason_counts: dict[str, int] = {}
     backlog_ages_minutes: list[float] = []
     excluded_bad_timestamps = 0
+    auto_approved = 0
 
     for req in requisitions:
-        label = classify_variant(req)
-        stats = variants.setdefault(label, VariantStats(label))
+        profile = profile_case(req, now)
+        stats = variants.setdefault(profile.sequence, VariantStats(profile.sequence))
         stats.count += 1
 
-        if label == "Awaiting review (open)":
-            reason = classify_backlog_reason(req)
-            backlog_by_reason[reason] = backlog_by_reason.get(reason, 0) + 1
-            created = _parse_instant(req.get("createdAt"))
-            if created is not None:
-                backlog_ages_minutes.append((now - created).total_seconds() / 60.0)
-        else:
-            minutes = cycle_minutes(req)
-            if minutes is not None:
-                stats.cycle_minutes.append(minutes)
-            elif req.get("decidedAt") is not None:
-                # Decided, but the timestamps didn't produce a usable
-                # (non-negative) duration -- bad data, not "undecided".
-                excluded_bad_timestamps += 1
+        if profile.total_minutes is not None:
+            stats.total_minutes.append(profile.total_minutes)
+        if profile.queue_minutes is not None:
+            stats.queue_minutes.append(profile.queue_minutes)
+        if profile.decision_minutes is not None:
+            stats.decision_minutes.append(profile.decision_minutes)
+        if profile.bad_timestamps:
+            excluded_bad_timestamps += 1
+        if profile.backlog_age_minutes is not None:
+            backlog_ages_minutes.append(profile.backlog_age_minutes)
+        if profile.flag_category is not None:
+            flag_reason_counts[profile.flag_category] = flag_reason_counts.get(profile.flag_category, 0) + 1
+        if req.get("status") == "AUTO_APPROVED":
+            auto_approved += 1
 
     total = len(requisitions)
-    auto_approved = variants.get("Straight-through (auto-approved)", VariantStats("")).count
-    manually_decided = sum(
-        v.count for k, v in variants.items() if k.startswith("Manually")
-    )
     hours_saved = auto_approved * ASSUMED_MANUAL_REVIEW_MINUTES / 60.0
     cost_avoided = hours_saved * ASSUMED_REVIEWER_HOURLY_COST_USD
 
@@ -186,8 +250,7 @@ def build_report(requisitions: list[dict]) -> dict:
         "total": total,
         "variants": variants,
         "auto_approved": auto_approved,
-        "manually_decided": manually_decided,
-        "backlog_by_reason": backlog_by_reason,
+        "flag_reason_counts": flag_reason_counts,
         "backlog_ages_minutes": backlog_ages_minutes,
         "hours_saved": hours_saved,
         "cost_avoided": cost_avoided,
@@ -199,24 +262,36 @@ def build_report(requisitions: list[dict]) -> dict:
     }
 
 
+def _fmt_minutes(value: float | None) -> str:
+    return f"{value:,.1f} min" if value is not None else "--"
+
+
 def print_report(report: dict) -> None:
     total = report["total"]
     print(f"\nReqFlow process intelligence -- {total} requisitions in scope\n")
-    print(f"{'Decision path':38} {'Count':>6} {'Share':>7} {'Avg cycle':>12}")
+    print(f"{'Variant (activity sequence)':46} {'Count':>6} {'Share':>7} "
+          f"{'Total':>10} {'Queue':>10} {'Decision':>10}")
     for label, stats in sorted(report["variants"].items(), key=lambda kv: -kv[1].count):
         share = f"{100 * stats.count / total:.0f}%" if total else "--"
-        avg = stats.avg_cycle_minutes
-        avg_str = f"{avg:,.1f} min" if avg is not None else "--"
-        print(f"{label:38} {stats.count:>6} {share:>7} {avg_str:>12}")
-    print(f"\n  {LIMITATION_NOTE}")
+        print(f"{label:46} {stats.count:>6} {share:>7} "
+              f"{_fmt_minutes(stats.avg_total_minutes):>10} "
+              f"{_fmt_minutes(stats.avg_queue_minutes):>10} "
+              f"{_fmt_minutes(stats.avg_decision_minutes):>10}")
+    print(
+        "\n  Queue/Decision only populate for cases with an explicit "
+        "OPENED_FOR_REVIEW event (both the triage agent and a real reviewer "
+        "UI would call POST .../open before deciding); without it, Total is "
+        "all that can be reported -- disclosed, not interpolated."
+    )
 
-    if report["backlog_by_reason"]:
-        print("\nOpen backlog, by original flag reason:")
-        for label, count in sorted(report["backlog_by_reason"].items(), key=lambda kv: -kv[1]):
+    if report["flag_reason_counts"]:
+        print("\nAll flagged cases, by original flag reason (decided or still open):")
+        for label, count in sorted(report["flag_reason_counts"].items(), key=lambda kv: -kv[1]):
             print(f"  {label:42} {count:>4}")
         ages = report["backlog_ages_minutes"]
         if ages:
-            print(f"  (average time in backlog so far: {statistics.mean(ages):,.1f} min)")
+            print(f"  (average age of the {len(ages)} case(s) still awaiting a decision: "
+                  f"{statistics.mean(ages):,.1f} min)")
 
     print("\nEstimated business value of auto-approval, this run:")
     print(f"  {report['auto_approved']} requisitions never reached a human reviewer")
@@ -243,7 +318,7 @@ def print_report(report: dict) -> None:
     if report["excluded_bad_timestamps"]:
         print(
             f"\n  Note: {report['excluded_bad_timestamps']} decided requisition(s) had "
-            "decidedAt before createdAt and were excluded from cycle-time stats as bad data."
+            "an out-of-order event timestamp and were excluded from cycle-time stats as bad data."
         )
 
 
@@ -254,16 +329,19 @@ def render_chart(report: dict, out_path: Path) -> None:
 
     labels = list(report["variants"].keys())
     counts = [report["variants"][l].count for l in labels]
-    avg_cycles = [report["variants"][l].avg_cycle_minutes or 0 for l in labels]
+    queue = [report["variants"][l].avg_queue_minutes or 0 for l in labels]
+    decision = [report["variants"][l].avg_decision_minutes or 0 for l in labels]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
     ax1.barh(labels, counts, color="#4C72B0")
-    ax1.set_title("Requisitions per decision path")
+    ax1.set_title("Requisitions per variant")
     ax1.set_xlabel("Count")
 
-    ax2.barh(labels, avg_cycles, color="#DD8452")
-    ax2.set_title("Avg cycle time by path")
+    ax2.barh(labels, queue, color="#DD8452", label="Queue time")
+    ax2.barh(labels, decision, left=queue, color="#55A868", label="Decision time")
+    ax2.set_title("Avg cycle time, queue vs. decision")
     ax2.set_xlabel("Minutes")
+    ax2.legend(loc="lower right", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -276,23 +354,34 @@ def render_markdown(report: dict, chart_path: str | None) -> str:
         "",
         f"Scope: {report['total']} requisitions currently in the system.",
         "",
-        "## Decision paths",
+        "## Variants (actual activity sequences)",
         "",
-        "| Decision path | Count | Share | Avg cycle time |",
-        "|---|---:|---:|---:|",
+        "| Variant | Count | Share | Avg total | Avg queue | Avg decision |",
+        "|---|---:|---:|---:|---:|---:|",
     ]
+    total = report["total"]
     for label, stats in sorted(report["variants"].items(), key=lambda kv: -kv[1].count):
-        share = f"{100 * stats.count / report['total']:.0f}%" if report["total"] else "--"
-        avg = stats.avg_cycle_minutes
-        avg_str = f"{avg:,.1f} min" if avg is not None else "--"
-        lines.append(f"| {label} | {stats.count} | {share} | {avg_str} |")
-    lines += ["", f"*{LIMITATION_NOTE}*"]
+        share = f"{100 * stats.count / total:.0f}%" if total else "--"
+        lines.append(
+            f"| {label} | {stats.count} | {share} | {_fmt_minutes(stats.avg_total_minutes)} | "
+            f"{_fmt_minutes(stats.avg_queue_minutes)} | {_fmt_minutes(stats.avg_decision_minutes)} |"
+        )
+    lines += [
+        "",
+        "*Queue/decision only populate for cases with an explicit "
+        "`OPENED_FOR_REVIEW` event -- without one, only the total is "
+        "reportable, disclosed rather than interpolated.*",
+    ]
 
-    if report["backlog_by_reason"]:
-        lines += ["", "## Open backlog, by original flag reason", "",
+    if report["flag_reason_counts"]:
+        lines += ["", "## All flagged cases, by original flag reason (decided or still open)", "",
                   "| Reason | Count |", "|---|---:|"]
-        for label, count in sorted(report["backlog_by_reason"].items(), key=lambda kv: -kv[1]):
+        for label, count in sorted(report["flag_reason_counts"].items(), key=lambda kv: -kv[1]):
             lines.append(f"| {label} | {count} |")
+        ages = report["backlog_ages_minutes"]
+        if ages:
+            lines += ["", f"*{len(ages)} case(s) still awaiting a decision; average age "
+                          f"{statistics.mean(ages):,.1f} min.*"]
 
     lines += [
         "",
@@ -315,13 +404,13 @@ def render_markdown(report: dict, chart_path: str | None) -> str:
     ]
 
     if chart_path:
-        lines += ["", f"![Decision-path and cycle-time chart]({chart_path})"]
+        lines += ["", f"![Variant and cycle-time chart]({chart_path})"]
 
     if report["excluded_bad_timestamps"]:
         lines += [
             "",
-            f"*{report['excluded_bad_timestamps']} decided requisition(s) had `decidedAt` "
-            "before `createdAt` and were excluded from cycle-time stats as bad data.*",
+            f"*{report['excluded_bad_timestamps']} decided requisition(s) had an "
+            "out-of-order event timestamp and were excluded from cycle-time stats as bad data.*",
         ]
 
     return "\n".join(lines) + "\n"

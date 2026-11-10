@@ -99,6 +99,16 @@ class ReqFlowClient:
         return self._request("POST", f"/api/requisitions/{requisition_id}/reject",
                               {"decidedBy": AGENT_IDENTITY, "reason": reason})
 
+    def open_requisition(self, requisition_id: int) -> dict:
+        """Not a model tool -- the orchestration loop below calls this
+        directly, once per requisition, right before handing it to
+        mock_decide/live_decide. It marks the case as picked up without
+        deciding it, so ReqFlow's event log (and analytics/
+        process_intelligence.py downstream) can see queue-time (flagged ->
+        picked up) and decision-time (picked up -> decided) as two separate
+        numbers instead of one lump cycle time."""
+        return self._request("POST", f"/api/requisitions/{requisition_id}/open")
+
 
 TOOL_DEFINITIONS = [
     {
@@ -273,6 +283,12 @@ def run(base_url: str, force_mock: bool, username: str, password: str) -> int:
         print(f"--- Requisition #{rid}: {requisition['requesterName']} / "
               f"{requisition['department']} / {requisition['amount']} ---")
         print(f"  Flagged because: {requisition.get('decisionReason')}")
+
+        # Marks the case as picked up before reasoning about it -- not a
+        # decision, so it doesn't go through decide()/_execute. This is what
+        # gives the event log a real queue-time vs. decision-time split
+        # instead of one lump cycle time (see analytics/process_intelligence.py).
+        client.open_requisition(rid)
 
         # decide() (mock_decide or live_decide) is the ONLY place that writes
         # the decision back to ReqFlow -- mock_decide calls _execute itself,

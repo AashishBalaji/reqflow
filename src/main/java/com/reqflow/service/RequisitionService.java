@@ -39,15 +39,18 @@ public class RequisitionService {
     private final RequisitionRepository requisitionRepository;
     private final VendorService vendorService;
     private final BudgetLineService budgetLineService;
+    private final RequisitionEventService requisitionEventService;
     private final ApprovalPolicyProperties policy;
 
     public RequisitionService(RequisitionRepository requisitionRepository,
                                VendorService vendorService,
                                BudgetLineService budgetLineService,
+                               RequisitionEventService requisitionEventService,
                                ApprovalPolicyProperties policy) {
         this.requisitionRepository = requisitionRepository;
         this.vendorService = vendorService;
         this.budgetLineService = budgetLineService;
+        this.requisitionEventService = requisitionEventService;
         this.policy = policy;
     }
 
@@ -62,7 +65,18 @@ public class RequisitionService {
                 request.category(), request.amount(), request.justification());
 
         applyAutoApprovalPolicy(requisition, vendor);
-        return requisitionRepository.save(requisition);
+        PurchaseRequisition saved = requisitionRepository.save(requisition);
+
+        // Recorded after save so the event carries the real (post-persist)
+        // id. SUBMITTED always comes first in the sequence, whatever the
+        // policy decided a moment later in the same call.
+        requisitionEventService.record(saved.getId(), "SUBMITTED", null);
+        if (saved.getStatus() == RequisitionStatus.AUTO_APPROVED) {
+            requisitionEventService.record(saved.getId(), "AUTO_APPROVED", saved.getDecisionReason());
+        } else {
+            requisitionEventService.record(saved.getId(), "FLAGGED_FOR_REVIEW", saved.getDecisionReason());
+        }
+        return saved;
     }
 
     private void applyAutoApprovalPolicy(PurchaseRequisition requisition, Vendor vendor) {
@@ -159,7 +173,9 @@ public class RequisitionService {
                 .ifPresent(line -> commitBudget(line, requisition.getAmount()));
 
         requisition.decide(RequisitionStatus.APPROVED, decidedBy, reason);
-        return requisitionRepository.save(requisition);
+        PurchaseRequisition saved = requisitionRepository.save(requisition);
+        requisitionEventService.record(saved.getId(), "APPROVED", reason);
+        return saved;
     }
 
     @Transactional
@@ -167,14 +183,34 @@ public class RequisitionService {
         PurchaseRequisition requisition = findById(id);
         requireReviewable(requisition);
         requisition.decide(RequisitionStatus.REJECTED, decidedBy, reason);
-        return requisitionRepository.save(requisition);
+        PurchaseRequisition saved = requisitionRepository.save(requisition);
+        requisitionEventService.record(saved.getId(), "REJECTED", reason);
+        return saved;
+    }
+
+    /**
+     * Marks a flagged requisition as picked up for review, without
+     * deciding it -- the step a human opening a case, or the triage agent
+     * starting to look at one, actually corresponds to. Doesn't exist
+     * purely for completeness: it's what lets an event-log analysis (see
+     * analytics/process_intelligence.py) decompose total cycle time into
+     * queue-time (flagged -> opened) and decision-time (opened -> decided)
+     * instead of only ever seeing one lump sum. Callable more than once;
+     * only the first OPENED_FOR_REVIEW event is used for that split.
+     */
+    @Transactional
+    public PurchaseRequisition openForReview(Long id) {
+        PurchaseRequisition requisition = findById(id);
+        requireReviewable(requisition);
+        requisitionEventService.record(requisition.getId(), "OPENED_FOR_REVIEW", null);
+        return requisition;
     }
 
     private void requireReviewable(PurchaseRequisition requisition) {
         if (requisition.getStatus() != RequisitionStatus.PENDING_REVIEW) {
             throw new IllegalStateException(
                     "Requisition " + requisition.getId() + " is " + requisition.getStatus()
-                            + " and is not open for a new decision");
+                            + " and is not pending review");
         }
     }
 }

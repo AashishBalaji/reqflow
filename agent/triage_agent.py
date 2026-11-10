@@ -32,6 +32,7 @@ Usage:
 """
 
 import argparse
+import base64
 import json
 import os
 import sys
@@ -44,6 +45,12 @@ from typing import Any
 DEFAULT_BASE_URL = "http://localhost:8080"
 AGENT_IDENTITY = "agent:claude-triage-v1"
 
+# ReqFlow requires HTTP Basic auth on every POST (SecurityConfig); GET
+# stays open. Override with REQFLOW_API_USERNAME/REQFLOW_API_PASSWORD --
+# these default to the same dev credentials application.yml ships with.
+DEFAULT_API_USERNAME = os.environ.get("REQFLOW_API_USERNAME", "reviewer")
+DEFAULT_API_PASSWORD = os.environ.get("REQFLOW_API_PASSWORD", "reqflow-dev")
+
 
 # ---------------------------------------------------------------------------
 # Tools: each one is a direct, auditable call to a ReqFlow REST endpoint.
@@ -53,14 +60,19 @@ AGENT_IDENTITY = "agent:claude-triage-v1"
 # ---------------------------------------------------------------------------
 
 class ReqFlowClient:
-    def __init__(self, base_url: str):
+    def __init__(self, base_url: str, username: str = DEFAULT_API_USERNAME,
+                 password: str = DEFAULT_API_PASSWORD):
         self.base_url = base_url.rstrip("/")
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        self._auth_header = f"Basic {token}"
 
     def _request(self, method: str, path: str, body: dict | None = None) -> Any:
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8") if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method,
-                                      headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
+        if method != "GET":  # GET is open; only mutating calls need auth
+            headers["Authorization"] = self._auth_header
+        req = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 raw = resp.read()
@@ -220,8 +232,8 @@ def live_decide(requisition: dict, client: ReqFlowClient) -> Decision:
 
 # ---------------------------------------------------------------------------
 
-def run(base_url: str, force_mock: bool) -> int:
-    client = ReqFlowClient(base_url)
+def run(base_url: str, force_mock: bool, username: str, password: str) -> int:
+    client = ReqFlowClient(base_url, username, password)
     use_mock = force_mock or not os.environ.get("ANTHROPIC_API_KEY")
     mode = "MOCK (deterministic, no API key)" if use_mock else "LIVE (Anthropic tool use)"
     print(f"ReqFlow triage agent starting in {mode} mode against {base_url}")
@@ -263,8 +275,12 @@ def main():
                          help=f"ReqFlow API base URL (default: {DEFAULT_BASE_URL})")
     parser.add_argument("--mock", action="store_true",
                          help="Force mock mode even if ANTHROPIC_API_KEY is set")
+    parser.add_argument("--username", default=DEFAULT_API_USERNAME,
+                         help="HTTP Basic auth username for POST calls (default: reviewer, or $REQFLOW_API_USERNAME)")
+    parser.add_argument("--password", default=DEFAULT_API_PASSWORD,
+                         help="HTTP Basic auth password for POST calls (default: reqflow-dev, or $REQFLOW_API_PASSWORD)")
     args = parser.parse_args()
-    sys.exit(run(args.base_url, args.mock))
+    sys.exit(run(args.base_url, args.mock, args.username, args.password))
 
 
 if __name__ == "__main__":

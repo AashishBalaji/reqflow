@@ -30,3 +30,9 @@ reqflow:
   policy:
     auto-approval-ceiling: 50000.00
     vendor-risk-ceiling: 70
+  security:
+    # Dev/demo defaults -- override with REQFLOW_SECURITY_USERNAME /
+    # REQFLOW_SECURITY_PASSWORD for anything beyond local use. Required
+    # as HTTP Basic auth on every mutating (POST) endpoint; GET stays open.
+    username: reviewer
+    password: reqflow-dev

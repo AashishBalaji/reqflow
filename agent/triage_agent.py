@@ -157,6 +157,12 @@ class Decision:
 
 # ---------------------------------------------------------------------------
 # Mock mode: deterministic stand-in policy, no API key required.
+#
+# Executes its own approve_requisition/reject_requisition call, exactly
+# like live_decide does when the model calls that tool -- this is what
+# makes "mock and live share one code path" actually true rather than a
+# claim that only holds by coincidence. Both functions are the single
+# place a decision gets written; run() never writes a second time.
 # ---------------------------------------------------------------------------
 
 def mock_decide(requisition: dict, client: ReqFlowClient) -> Decision:
@@ -164,17 +170,27 @@ def mock_decide(requisition: dict, client: ReqFlowClient) -> Decision:
     rid = requisition["id"]
 
     if not vendor["active"]:
-        return Decision(rid, "reject", f"Vendor '{vendor['name']}' is inactive; cannot proceed.")
-    if vendor["riskScore"] >= 80:
-        return Decision(rid, "reject",
-                         f"Vendor '{vendor['name']}' risk score {vendor['riskScore']} is too high "
-                         f"to approve even on manual review.")
-    if len(requisition.get("justification", "").strip()) < 8:
-        return Decision(rid, "reject", "Justification is too vague to approve on review.")
+        decision = Decision(rid, "reject", f"Vendor '{vendor['name']}' is inactive; cannot proceed.")
+    elif vendor["riskScore"] >= 80:
+        decision = Decision(rid, "reject",
+                             f"Vendor '{vendor['name']}' risk score {vendor['riskScore']} is too high "
+                             f"to approve even on manual review.")
+    elif len(requisition.get("justification", "").strip()) < 8:
+        decision = Decision(rid, "reject", "Justification is too vague to approve on review.")
+    else:
+        decision = Decision(rid, "approve",
+                             f"Vendor '{vendor['name']}' risk score {vendor['riskScore']} is acceptable on "
+                             f"manual review; justification is specific and amount is reasonable for the request.")
 
-    return Decision(rid, "approve",
-                     f"Vendor '{vendor['name']}' risk score {vendor['riskScore']} is acceptable on "
-                     f"manual review; justification is specific and amount is reasonable for the request.")
+    _execute(decision, client)
+    return decision
+
+
+def _execute(decision: Decision, client: ReqFlowClient) -> None:
+    if decision.action == "approve":
+        client.approve_requisition(decision.requisition_id, decision.reason)
+    else:
+        client.reject_requisition(decision.requisition_id, decision.reason)
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +274,13 @@ def run(base_url: str, force_mock: bool, username: str, password: str) -> int:
               f"{requisition['department']} / {requisition['amount']} ---")
         print(f"  Flagged because: {requisition.get('decisionReason')}")
 
+        # decide() (mock_decide or live_decide) is the ONLY place that writes
+        # the decision back to ReqFlow -- mock_decide calls _execute itself,
+        # live_decide's tool dispatch calls the identical client method when
+        # the model invokes approve_requisition/reject_requisition. Calling
+        # approve/reject again here would hit RequisitionService's
+        # already-decided guard and throw on every single requisition.
         decision = decide(requisition, client)
-        if decision.action == "approve":
-            client.approve_requisition(decision.requisition_id, decision.reason)
-        else:
-            client.reject_requisition(decision.requisition_id, decision.reason)
 
         print(f"  Decision: {decision.action.upper()} - {decision.reason}\n")
 

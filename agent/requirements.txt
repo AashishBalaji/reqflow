@@ -1,0 +1,3 @@
+# Only needed for live mode (ANTHROPIC_API_KEY set). Mock mode uses only
+# the Python standard library and needs nothing installed.
+anthropic>=0.40.0

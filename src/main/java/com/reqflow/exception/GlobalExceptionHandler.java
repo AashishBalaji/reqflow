@@ -39,14 +39,17 @@ public class GlobalExceptionHandler {
     }
 
     /** Catches violations of DB-level constraints the entities declare but
-     * no service-layer pre-check enforces -- e.g. BudgetLine's unique
-     * (department, category, fiscalYear) constraint. Without this, a
-     * second POST for the same budget line falls through to a raw 500. */
+     * no service-layer pre-check enforces -- today that's only
+     * BudgetLine's unique (department, category, fiscalYear) constraint,
+     * but the message stays generic rather than naming that one specific
+     * case, since this handler fires for ANY such violation and a more
+     * specific message here would mislead the moment a second constraint
+     * exists. Without this handler at all, a violation falls through to
+     * a raw 500. */
     @ExceptionHandler(DataIntegrityViolationException.class)
     public ResponseEntity<Map<String, Object>> handleDataIntegrityViolation(DataIntegrityViolationException ex) {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(body(HttpStatus.CONFLICT,
-                "This conflicts with an existing record (e.g. a duplicate budget line for the same "
-                        + "department/category/fiscal year)."));
+                "This conflicts with an existing record and violates a data constraint."));
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)

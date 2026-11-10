@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
@@ -78,7 +79,7 @@ public class RequisitionService {
             return;
         }
 
-        int currentFiscalYear = java.time.Instant.now().atZone(ZoneOffset.UTC).getYear();
+        int currentFiscalYear = currentFiscalYear();
         Optional<BudgetLine> budgetLine = budgetLineService.find(
                 requisition.getDepartment(), requisition.getCategory(), currentFiscalYear);
 
@@ -111,6 +112,14 @@ public class RequisitionService {
         budgetLineService.save(budgetLine);
     }
 
+    /** Budget lines are tracked per fiscal year; this project has no
+     * separate fiscal-calendar config, so "current fiscal year" is simply
+     * the calendar year in UTC. Pulled out once so create() and approve()
+     * can't drift against each other on how that's computed. */
+    private int currentFiscalYear() {
+        return Instant.now().atZone(ZoneOffset.UTC).getYear();
+    }
+
     public List<PurchaseRequisition> findAll() {
         return requisitionRepository.findAll();
     }
@@ -133,14 +142,20 @@ public class RequisitionService {
      * requisition flagged for vendor risk rather than budget simply has
      * nothing new to commit here; commitBudget is only reached when a
      * line exists.)
+     *
+     * Deliberately has no amount/risk/budget floor of its own: this IS
+     * the human-override path, so a reviewer can approve something the
+     * policy rejected (including pushing a budget line negative) and the
+     * decision is trusted as given, recorded under decidedBy. That makes
+     * this the single most consequential call in the service -- there is
+     * no safety net below it.
      */
     @Transactional
     public PurchaseRequisition approve(Long id, String decidedBy, String reason) {
         PurchaseRequisition requisition = findById(id);
         requireReviewable(requisition);
 
-        int currentFiscalYear = java.time.Instant.now().atZone(ZoneOffset.UTC).getYear();
-        budgetLineService.find(requisition.getDepartment(), requisition.getCategory(), currentFiscalYear)
+        budgetLineService.find(requisition.getDepartment(), requisition.getCategory(), currentFiscalYear())
                 .ifPresent(line -> commitBudget(line, requisition.getAmount()));
 
         requisition.decide(RequisitionStatus.APPROVED, decidedBy, reason);

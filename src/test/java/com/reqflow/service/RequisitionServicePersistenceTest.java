@@ -3,6 +3,7 @@ package com.reqflow.service;
 import com.reqflow.dto.CreateBudgetLineRequest;
 import com.reqflow.dto.CreateRequisitionRequest;
 import com.reqflow.dto.CreateVendorRequest;
+import com.reqflow.model.BudgetLine;
 import com.reqflow.model.PurchaseRequisition;
 import com.reqflow.model.RequisitionStatus;
 import com.reqflow.repository.BudgetLineRepository;
@@ -13,12 +14,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Deliberately NOT @Transactional at the class level, unlike
@@ -95,5 +98,31 @@ class RequisitionServicePersistenceTest {
         assertEquals(RequisitionStatus.APPROVED, approved.getStatus());
         var persisted = budgetLineService.find("Engineering", "office_supplies", currentFiscalYear).orElseThrow();
         assertEquals(new BigDecimal("9500.00"), persisted.remaining());
+    }
+
+    /**
+     * Exercises the @Version field directly, without needing real
+     * threads: load the same BudgetLine row through two independent
+     * reads (standing in for two concurrent requisitions both passing the
+     * remaining() check before either commits), save the first --
+     * succeeds and bumps the version -- then save the second, stale copy.
+     * That second save is exactly what a losing concurrent request would
+     * hit, and it must throw rather than silently overwrite the first
+     * commit (which is what would over-spend the budget).
+     */
+    @Test
+    void concurrentBudgetCommitsAreRejectedByOptimisticLock() {
+        BudgetLine firstRead = budgetLineService.find("Engineering", "office_supplies", currentFiscalYear).orElseThrow();
+        BudgetLine secondRead = budgetLineService.find("Engineering", "office_supplies", currentFiscalYear).orElseThrow();
+
+        firstRead.commit(new BigDecimal("1000.00"));
+        budgetLineService.save(firstRead);
+
+        secondRead.commit(new BigDecimal("2000.00"));
+        assertThrows(ObjectOptimisticLockingFailureException.class, () -> budgetLineService.save(secondRead));
+
+        // The loser's write never landed -- only the first commit counts.
+        var persisted = budgetLineService.find("Engineering", "office_supplies", currentFiscalYear).orElseThrow();
+        assertEquals(new BigDecimal("9000.00"), persisted.remaining());
     }
 }

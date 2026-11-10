@@ -81,9 +81,18 @@ ASSUMED_MONTHLY_VOLUME_AT_SCALE = 2000
 # now applies to every flagged case (decided or not): the category comes
 # from the event's own permanent detail text, not from the requisition's
 # current decisionReason, which a later decision overwrites.
+#
+# Order matters and probe text must be specific. The vendor-risk message
+# ("...risk score %d is at or above the CEILING of %d") also contains the
+# word "ceiling" -- an earlier version of this list probed for the bare
+# word "ceiling" first and so silently miscategorized every vendor-risk
+# flag as an amount-ceiling flag. "risk score" is checked first, and the
+# amount probe is the specific phrase "auto-approval ceiling" (the exact
+# wording RequisitionService uses for that case and only that case), so
+# neither probe can shadow the other regardless of order.
 FLAG_CATEGORY_PROBES = [
-    ("ceiling", "Amount over auto-approval ceiling"),
     ("risk score", "Vendor risk too high / inactive"),
+    ("auto-approval ceiling", "Amount over auto-approval ceiling"),
     ("budget", "Budget headroom insufficient or untracked"),
 ]
 
@@ -139,6 +148,29 @@ class CaseProfile:
     decision_minutes: float | None  # OPENED_FOR_REVIEW -> terminal (None if never opened)
     backlog_age_minutes: float | None  # now - last event, only set when not yet decided
     bad_timestamps: bool            # decided, but a duration came out negative
+    decided_by: str | None          # who/what made the terminal call, for an organizational cut
+    conformance_issue: str | None   # None if the case matches the expected control flow
+
+
+def check_conformance(events: list[dict], flagged_event: dict | None,
+                       opened_event: dict | None, terminal_event: dict | None) -> str | None:
+    """A minimal, hand-rolled conformance check against the one control-flow
+    rule this process actually commits to: SUBMITTED is always first, and a
+    flagged case that reaches a decision is expected to have been picked up
+    (OPENED_FOR_REVIEW) first -- that's the whole reason the endpoint exists.
+    The API doesn't *enforce* that ordering (approve/reject only require
+    PENDING_REVIEW status, not a prior open event), so a case can legally
+    skip straight from FLAGGED_FOR_REVIEW to a decision -- e.g. a reviewer
+    calling the API directly instead of through the expected UI/agent path.
+    That's a real deviation worth surfacing, not a crash: the case is still
+    valid data, it just didn't follow the expected path, which is exactly
+    what conformance checking means in process mining (checking an event
+    log against an expected model, not just describing what happened)."""
+    if not events or events[0]["activity"] != "SUBMITTED":
+        return "Does not start with SUBMITTED"
+    if flagged_event is not None and terminal_event is not None and opened_event is None:
+        return "Decided without ever being opened for review (bypassed the expected flag -> open -> decide path)"
+    return None
 
 
 def profile_case(req: dict, now: datetime) -> CaseProfile:
@@ -148,7 +180,8 @@ def profile_case(req: dict, now: datetime) -> CaseProfile:
         # anything created through RequisitionService, but a direct SQL
         # insert (or an older API version) could still produce this.
         return CaseProfile(NO_EVENT_LOG_LABEL, req.get("decidedAt") is not None,
-                            None, None, None, None, None, False)
+                            None, None, None, None, None, False,
+                            req.get("decidedBy"), "No event log at all")
 
     sequence = SEQUENCE_SEPARATOR.join(e["activity"] for e in events)
     submitted_at = _parse_instant(events[0]["occurredAt"])
@@ -175,9 +208,12 @@ def profile_case(req: dict, now: datetime) -> CaseProfile:
         if last_at is not None:
             backlog_age_minutes = max((now - last_at).total_seconds() / 60.0, 0.0)
 
+    conformance_issue = check_conformance(events, flagged_event, opened_event, terminal_event)
+
     return CaseProfile(sequence, terminal_event is not None, flag_category,
                         total_minutes, queue_minutes, decision_minutes,
-                        backlog_age_minutes, bad_timestamps)
+                        backlog_age_minutes, bad_timestamps,
+                        req.get("decidedBy"), conformance_issue)
 
 
 def classify_flag_reason(detail: str | None) -> str:
@@ -216,6 +252,8 @@ def build_report(requisitions: list[dict]) -> dict:
     backlog_ages_minutes: list[float] = []
     excluded_bad_timestamps = 0
     auto_approved = 0
+    conformance_issues: list[tuple[int | None, str]] = []
+    decisions_by_reviewer: dict[str, int] = {}
 
     for req in requisitions:
         profile = profile_case(req, now)
@@ -236,6 +274,10 @@ def build_report(requisitions: list[dict]) -> dict:
             flag_reason_counts[profile.flag_category] = flag_reason_counts.get(profile.flag_category, 0) + 1
         if req.get("status") == "AUTO_APPROVED":
             auto_approved += 1
+        if profile.conformance_issue is not None:
+            conformance_issues.append((req.get("id"), profile.conformance_issue))
+        if profile.is_decided and profile.decided_by:
+            decisions_by_reviewer[profile.decided_by] = decisions_by_reviewer.get(profile.decided_by, 0) + 1
 
     total = len(requisitions)
     hours_saved = auto_approved * ASSUMED_MANUAL_REVIEW_MINUTES / 60.0
@@ -259,6 +301,8 @@ def build_report(requisitions: list[dict]) -> dict:
         "scaled_hours_saved": scaled_hours_saved,
         "scaled_cost_avoided": scaled_cost_avoided,
         "excluded_bad_timestamps": excluded_bad_timestamps,
+        "conformance_issues": conformance_issues,
+        "decisions_by_reviewer": decisions_by_reviewer,
     }
 
 
@@ -321,6 +365,20 @@ def print_report(report: dict) -> None:
             "an out-of-order event timestamp and were excluded from cycle-time stats as bad data."
         )
 
+    if report["decisions_by_reviewer"]:
+        print("\nDecisions by reviewer (human name or agent:claude-triage-v1):")
+        for reviewer, count in sorted(report["decisions_by_reviewer"].items(), key=lambda kv: -kv[1]):
+            print(f"  {reviewer:42} {count:>4}")
+
+    print("\nConformance check (against the expected SUBMITTED -> ... -> decided flow):")
+    issues = report["conformance_issues"]
+    if issues:
+        print(f"  {len(issues)} case(s) deviated from the expected control flow:")
+        for req_id, issue in issues:
+            print(f"    requisition {req_id}: {issue}")
+    else:
+        print(f"  All {report['total']} case(s) conform -- no deviations found.")
+
 
 def render_chart(report: dict, out_path: Path) -> None:
     import matplotlib
@@ -332,16 +390,20 @@ def render_chart(report: dict, out_path: Path) -> None:
     queue = [report["variants"][l].avg_queue_minutes or 0 for l in labels]
     decision = [report["variants"][l].avg_decision_minutes or 0 for l in labels]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.5), sharey=True)
     ax1.barh(labels, counts, color="#4C72B0")
     ax1.set_title("Requisitions per variant")
     ax1.set_xlabel("Count")
 
+    # sharey=True puts the same variant labels on ax1 already; repeating
+    # them on ax2 only ate horizontal room and pushed its own title off the
+    # edge of the figure, so they're hidden here rather than duplicated.
     ax2.barh(labels, queue, color="#DD8452", label="Queue time")
     ax2.barh(labels, decision, left=queue, color="#55A868", label="Decision time")
-    ax2.set_title("Avg cycle time, queue vs. decision")
+    ax2.set_title("Avg cycle time: queue vs. decision")
     ax2.set_xlabel("Minutes")
-    ax2.legend(loc="lower right", fontsize=8)
+    ax2.tick_params(axis="y", labelleft=False)
+    ax2.legend(loc="upper right", fontsize=8, framealpha=0.95)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -382,6 +444,30 @@ def render_markdown(report: dict, chart_path: str | None) -> str:
         if ages:
             lines += ["", f"*{len(ages)} case(s) still awaiting a decision; average age "
                           f"{statistics.mean(ages):,.1f} min.*"]
+
+    if report["decisions_by_reviewer"]:
+        lines += ["", "## Decisions by reviewer", "",
+                  "| Reviewer | Decisions |", "|---|---:|"]
+        for reviewer, count in sorted(report["decisions_by_reviewer"].items(), key=lambda kv: -kv[1]):
+            lines.append(f"| {reviewer} | {count} |")
+        lines += ["", "*Human name or `agent:claude-triage-v1` -- a cheap organizational-mining "
+                      "cut (who's deciding what) over a field (`decidedBy`) the API already carries.*"]
+
+    lines += ["", "## Conformance check",
+              "",
+              "Checked against the expected control flow: every case starts with "
+              "`SUBMITTED`, and a flagged case that reaches a decision is expected to "
+              "have been opened for review first. The API doesn't enforce that "
+              "ordering -- `approve`/`reject` only require `PENDING_REVIEW` status, "
+              "not a prior `OPENED_FOR_REVIEW` event -- so a deviation here is real "
+              "data, not a bug."]
+    issues = report["conformance_issues"]
+    if issues:
+        lines += ["", f"**{len(issues)}** case(s) deviated from the expected flow:", ""]
+        for req_id, issue in issues:
+            lines.append(f"- requisition {req_id}: {issue}")
+    else:
+        lines += ["", f"All **{report['total']}** case(s) conform -- no deviations found."]
 
     lines += [
         "",

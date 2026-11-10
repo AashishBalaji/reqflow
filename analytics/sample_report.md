@@ -1,17 +1,18 @@
 # ReqFlow Process Intelligence -- Proof-of-Value Summary
 
-> Sample output from a small local demo run (6 hand-created requisitions, including a real event log walked through the agent's submit -> open -> decide flow), checked in to show the report's shape -- variants, the queue/decision split, and the flag-reason breakdown. Run against real usage, the same fields populate at whatever volume and cadence the process actually runs at, and the at-scale projection below shows how the same rate reads at a disclosed, hypothetical production volume.
+> Sample output from a small local demo run (7 hand-created requisitions, including one deliberately approved via a direct API call that skips the expected `/open` step, specifically so the conformance check below has a real deviation to catch rather than reporting a clean pass that's never actually been tested), checked in to show the report's shape -- variants, the queue/decision split, the reviewer breakdown, and conformance. Run against real usage, the same fields populate at whatever volume and cadence the process actually runs at, and the at-scale projection below shows how the same rate reads at a disclosed, hypothetical production volume.
 
-Scope: 6 requisitions currently in the system.
+Scope: 7 requisitions currently in the system.
 
 ## Variants (actual activity sequences)
 
 | Variant | Count | Share | Avg total | Avg queue | Avg decision |
 |---|---:|---:|---:|---:|---:|
-| SUBMITTED → AUTO_APPROVED | 2 | 33% | 0.0 min | -- | 0.0 min |
-| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → APPROVED | 2 | 33% | 0.4 min | 0.4 min | 0.0 min |
-| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → REJECTED | 1 | 17% | 0.4 min | 0.3 min | 0.0 min |
-| SUBMITTED → FLAGGED_FOR_REVIEW | 1 | 17% | -- | -- | -- |
+| SUBMITTED → AUTO_APPROVED | 2 | 29% | 0.0 min | -- | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → APPROVED | 2 | 29% | 0.4 min | 0.4 min | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW → OPENED_FOR_REVIEW → REJECTED | 1 | 14% | 0.4 min | 0.3 min | 0.0 min |
+| SUBMITTED → FLAGGED_FOR_REVIEW | 1 | 14% | -- | -- | -- |
+| SUBMITTED → FLAGGED_FOR_REVIEW → APPROVED | 1 | 14% | 0.0 min | -- | 0.0 min |
 
 *Queue/decision only populate for cases with an explicit `OPENED_FOR_REVIEW` event -- without one, only the total is reportable, disclosed rather than interpolated.*
 
@@ -19,10 +20,29 @@ Scope: 6 requisitions currently in the system.
 
 | Reason | Count |
 |---|---:|
-| Amount over auto-approval ceiling | 3 |
+| Vendor risk too high / inactive | 3 |
 | Budget headroom insufficient or untracked | 1 |
+| Amount over auto-approval ceiling | 1 |
 
-*1 case(s) still awaiting a decision; average age 3.0 min.*
+*1 case(s) still awaiting a decision; average age 12.8 min.*
+
+## Decisions by reviewer
+
+| Reviewer | Decisions |
+|---|---:|
+| agent:claude-triage-v1 | 3 |
+| system:auto-approval-policy | 2 |
+| direct-test-reviewer | 1 |
+
+*Human name or `agent:claude-triage-v1` -- a cheap organizational-mining cut (who's deciding what) over a field (`decidedBy`) the API already carries.*
+
+## Conformance check
+
+Checked against the expected control flow: every case starts with `SUBMITTED`, and a flagged case that reaches a decision is expected to have been opened for review first. The API doesn't enforce that ordering -- `approve`/`reject` only require `PENDING_REVIEW` status, not a prior `OPENED_FOR_REVIEW` event -- so a deviation here is real data, not a bug.
+
+**1** case(s) deviated from the expected flow:
+
+- requisition 7: Decided without ever being opened for review (bypassed the expected flag -> open -> decide path)
 
 ## Estimated business value
 
@@ -32,6 +52,6 @@ Scope: 6 requisitions currently in the system.
 
 *Assumptions are disclosed and swappable -- a real engagement would substitute the customer's own review-time and labor-cost figures.*
 
-At the same **33%** auto-approval rate but a production volume of **2,000/month** (disclosed, hypothetical): **~667** auto-approved, **~88.9 reviewer-hours** and **~$2,223/month** avoided.
+At the same **29%** auto-approval rate but a production volume of **2,000/month** (disclosed, hypothetical): **~571** auto-approved, **~76.1 reviewer-hours** and **~$1,903/month** avoided.
 
 ![Variant and cycle-time chart](sample_chart.png)

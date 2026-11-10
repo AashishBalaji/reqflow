@@ -142,6 +142,20 @@ and turns it into a proof-of-value-style summary:
   reviewer-hours and cost avoided by auto-approval, plus an at-scale
   projection so a small demo run's absolute numbers aren't mistaken for the
   finding itself.
+- **A toy conformance check** -- the one control-flow rule this process
+  actually commits to is checked directly: every case should start with
+  `SUBMITTED`, and a flagged case that reaches a decision is expected to
+  have been opened for review first. The API doesn't *enforce* that second
+  rule (`approve`/`reject` only require `PENDING_REVIEW` status, not a
+  prior `OPENED_FOR_REVIEW` event), so a case that skips straight from
+  `FLAGGED_FOR_REVIEW` to a decision -- a reviewer calling the API directly
+  instead of through the expected agent/UI path -- is valid data that
+  still deviates from the expected process, which is exactly what
+  conformance checking means in process mining: checking a log against an
+  expected model, not just describing what happened.
+- **Decisions by reviewer** -- a one-line organizational-mining cut (who's
+  deciding what) over the `decidedBy` field every requisition already
+  carries.
 
 It's a REST client, nothing more -- same relationship to the API that the
 triage agent has. No new endpoint was added for this script specifically;
@@ -152,7 +166,15 @@ cd analytics
 pip install -r requirements.txt   # only needed for --chart
 python process_intelligence.py                                    # console report
 python process_intelligence.py --out report.md --chart chart.png  # + files
+python -m unittest test_process_intelligence.py -v                # unit tests
 ```
+
+`test_process_intelligence.py` covers the script's pure logic (flag-reason
+classification, event-sort stability, conformance checking) without
+needing a running ReqFlow instance. It exists because of a real bug: an
+earlier probe order classified every vendor-risk flag as an amount-ceiling
+flag, because both messages contain the word "ceiling" -- caught by
+review, not by a test, because there wasn't one yet. There is now.
 
 `sample_report.md` / `sample_chart.png` are checked-in output from a small
 local demo run, so the report's shape is visible without running anything.

@@ -1,0 +1,32 @@
+spring:
+  application:
+    name: reqflow
+  datasource:
+    url: jdbc:h2:mem:reqflow;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    defer-datasource-initialization: true
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  sql:
+    init:
+      mode: always
+
+server:
+  port: 8080
+
+# Policy thresholds the triage service applies when a requisition is created.
+# Pulled out as config (not hardcoded) so the policy can change without a
+# code change -- the kind of thing a real procurement org tunes per quarter.
+reqflow:
+  policy:
+    auto-approval-ceiling: 50000.00
+    vendor-risk-ceiling: 70

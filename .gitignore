@@ -1,0 +1,8 @@
+target/
+*.class
+.idea/
+*.iml
+.vscode/
+__pycache__/
+*.pyc
+.DS_Store

@@ -40,4 +40,8 @@ public class BudgetLineService {
     public Optional<BudgetLine> find(String department, String category, int fiscalYear) {
         return budgetLineRepository.findByDepartmentAndCategoryAndFiscalYear(department, category, fiscalYear);
     }
+
+    public BudgetLine save(BudgetLine budgetLine) {
+        return budgetLineRepository.save(budgetLine);
+    }
 }

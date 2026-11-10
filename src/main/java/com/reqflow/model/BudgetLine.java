@@ -29,6 +29,18 @@ public class BudgetLine {
     @DecimalMin("0.0")
     private BigDecimal spentAmount = BigDecimal.ZERO;
 
+    /** Optimistic lock: without it, two requisitions against the same
+     * budget line could both read remaining() before either commits its
+     * spend, and both pass the headroom check -- over-committing the
+     * budget. With it, the loser of that race gets an
+     * ObjectOptimisticLockingFailureException instead of a silent
+     * over-commit (mapped to a 409 by GlobalExceptionHandler).
+     * columnDefinition gives existing/seeded rows a real 0 instead of
+     * NULL -- Hibernate's version-increment NPEs on a null version. */
+    @Version
+    @Column(nullable = false, columnDefinition = "bigint default 0")
+    private long version;
+
     protected BudgetLine() { }
 
     public BudgetLine(String department, String category, int fiscalYear, BigDecimal allocatedAmount) {

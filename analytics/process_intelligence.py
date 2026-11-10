@@ -27,6 +27,14 @@ would:
   reviewer-hours and cost avoided by auto-approval, plus an at-scale
   projection so a small demo run's absolute numbers aren't mistaken for
   the finding itself.
+- **A conformance check** against the one control-flow rule this process
+  actually commits to (every case starts with SUBMITTED; a flagged case
+  that reaches a decision should have been opened for review first), and
+  a decisions-by-reviewer cut over the decidedBy field every requisition
+  already carries.
+- **A process map** -- a directly-follows graph (nodes = activities,
+  edges = observed transitions, weighted by frequency) -- the standard
+  first visual in process mining, built straight from the same event log.
 
 It is a client of the REST API, nothing more -- the same relationship the
 AI triage agent (agent/triage_agent.py) has to ReqFlow. No new endpoint
@@ -36,6 +44,7 @@ API already returns on every requisition.
 Usage:
     python process_intelligence.py [--base-url http://localhost:8080]
     python process_intelligence.py --out report.md    # also write a report
+    python process_intelligence.py --out report.md --chart chart.png --process-map map.png
 """
 
 import argparse
@@ -254,6 +263,7 @@ def build_report(requisitions: list[dict]) -> dict:
     auto_approved = 0
     conformance_issues: list[tuple[int | None, str]] = []
     decisions_by_reviewer: dict[str, int] = {}
+    cycle_time_by_department: dict[str, list[float]] = {}
 
     for req in requisitions:
         profile = profile_case(req, now)
@@ -278,6 +288,18 @@ def build_report(requisitions: list[dict]) -> dict:
             conformance_issues.append((req.get("id"), profile.conformance_issue))
         if profile.is_decided and profile.decided_by:
             decisions_by_reviewer[profile.decided_by] = decisions_by_reviewer.get(profile.decided_by, 0) + 1
+        department = req.get("department")
+        if department and profile.total_minutes is not None:
+            cycle_time_by_department.setdefault(department, []).append(profile.total_minutes)
+
+    # (count, avg minutes) per department -- illustrative only at demo
+    # scale; a real engagement would need a far larger n before reading
+    # anything causal into a department difference, which the report text
+    # says explicitly rather than implying a finding from n=1 or n=2.
+    department_cycle_time = {
+        dept: (len(values), statistics.mean(values))
+        for dept, values in cycle_time_by_department.items()
+    }
 
     total = len(requisitions)
     hours_saved = auto_approved * ASSUMED_MANUAL_REVIEW_MINUTES / 60.0
@@ -303,6 +325,7 @@ def build_report(requisitions: list[dict]) -> dict:
         "excluded_bad_timestamps": excluded_bad_timestamps,
         "conformance_issues": conformance_issues,
         "decisions_by_reviewer": decisions_by_reviewer,
+        "department_cycle_time": department_cycle_time,
     }
 
 
@@ -370,6 +393,16 @@ def print_report(report: dict) -> None:
         for reviewer, count in sorted(report["decisions_by_reviewer"].items(), key=lambda kv: -kv[1]):
             print(f"  {reviewer:42} {count:>4}")
 
+    if report["department_cycle_time"]:
+        print("\nAvg total cycle time by department:")
+        for dept, (count, avg) in sorted(report["department_cycle_time"].items(), key=lambda kv: -kv[1][1]):
+            print(f"  {dept:30} {count:>3} case(s)   {_fmt_minutes(avg)}")
+        print(
+            "  (Illustrative only at this sample size -- a real engagement would "
+            "need far more cases per department before reading a difference as a "
+            "finding rather than noise.)"
+        )
+
     print("\nConformance check (against the expected SUBMITTED -> ... -> decided flow):")
     issues = report["conformance_issues"]
     if issues:
@@ -378,6 +411,132 @@ def print_report(report: dict) -> None:
             print(f"    requisition {req_id}: {issue}")
     else:
         print(f"  All {report['total']} case(s) conform -- no deviations found.")
+
+
+# A fixed, hand-placed layout for the six known activities. A real
+# process-discovery algorithm would infer node positions from the graph
+# structure itself; at exactly six known activities, a hand layout tuned
+# for this specific process reads more clearly than a generic
+# force-directed layout would, and needs no extra dependency (no
+# networkx/graphviz) beyond matplotlib, which this project already uses.
+_DFG_NODE_POSITIONS = {
+    "SUBMITTED": (0.0, 0.5),
+    "FLAGGED_FOR_REVIEW": (1.3, 0.1),
+    "AUTO_APPROVED": (1.3, 0.9),
+    "OPENED_FOR_REVIEW": (2.6, 0.1),
+    "APPROVED": (3.9, 0.3),
+    "REJECTED": (3.9, -0.1),
+}
+
+
+def build_dfg(requisitions: list[dict]) -> dict[tuple[str, str], int]:
+    """A directly-follows graph: for every pair of activities that occur
+    back-to-back anywhere in the event log, how many times that exact
+    transition happened. This is the standard first visual in process
+    mining -- nodes are activities, edges are observed transitions, edge
+    weight is frequency -- and it's what Celonis's own Process Explorer is
+    built on. Built straight from the raw event log (the same
+    _sorted_events used everywhere else), not from the already-aggregated
+    variant table, so a transition that appears inside several different
+    variants (e.g. SUBMITTED -> FLAGGED_FOR_REVIEW happens in three of the
+    five variants in the sample data) is correctly counted once per
+    occurrence rather than once per variant."""
+    edges: dict[tuple[str, str], int] = {}
+    for req in requisitions:
+        activities = [e["activity"] for e in _sorted_events(req)]
+        for a, b in zip(activities, activities[1:]):
+            edges[(a, b)] = edges.get((a, b), 0) + 1
+    return edges
+
+
+def render_process_map(dfg: dict[tuple[str, str], int], out_path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if not dfg:
+        return
+
+    nodes = sorted({a for a, _ in dfg} | {b for _, b in dfg})
+    positions = {}
+    unknown_count = 0
+    for node in nodes:
+        if node in _DFG_NODE_POSITIONS:
+            positions[node] = _DFG_NODE_POSITIONS[node]
+        else:
+            # Defensive fallback for any activity name this script doesn't
+            # know about yet (the Java side is the only writer of activity
+            # names today, so this shouldn't trigger) -- still renders
+            # something legible rather than a KeyError.
+            positions[node] = (5.2, 0.5 - 0.3 * unknown_count)
+            unknown_count += 1
+
+    fig, ax = plt.subplots(figsize=(11, 5))
+    max_count = max(dfg.values())
+    # A one-hop edge in this layout spans one column (~1.3 units on x).
+    # An edge spanning two or more columns -- a case that skipped an
+    # intermediate activity entirely, like the FLAGGED_FOR_REVIEW ->
+    # APPROVED bypass when a case is decided without ever being opened --
+    # needs a sharply different curvature from the normal one-hop edges,
+    # or its arc lands almost exactly on top of the two-hop path through
+    # the skipped node and reads as the same line. A real process-mining
+    # tool's layout engine solves this properly; here, a bigger curvature
+    # in the opposite direction is enough to make a skipped-activity case
+    # visually impossible to miss rather than quietly invisible.
+    ONE_HOP_SPAN = 1.6
+
+    for (a, b), count in sorted(dfg.items()):
+        x1, y1 = positions[a]
+        x2, y2 = positions[b]
+        width = 1.2 + 3.0 * (count / max_count)
+        is_multi_hop = abs(x2 - x1) > ONE_HOP_SPAN
+        rad = -0.45 if is_multi_hop else 0.12
+        ax.annotate(
+            "", xy=(x2, y2), xytext=(x1, y1),
+            arrowprops=dict(arrowstyle="-|>", color="#4C72B0" if not is_multi_hop else "#C44E52",
+                             lw=width, connectionstyle=f"arc3,rad={rad}",
+                             shrinkA=30, shrinkB=30, alpha=0.75),
+        )
+        # The label needs to sit on the arc itself, not on the straight
+        # chord between the two nodes -- for a curved (rad != 0) edge
+        # those are visibly different points, and guessing the curve's
+        # bow direction and magnitude by hand (an earlier version of this
+        # code did exactly that, with a sign that happened to roughly
+        # work for the small one-hop curvature but put the label well off
+        # the arc for the sharper, oppositely-signed multi-hop curvature)
+        # is exactly the kind of thing worth getting from the source
+        # instead of re-deriving. matplotlib's own arc3 connection style
+        # places its single Bezier control point at the documented
+        # formula below (control = chord midpoint + rad * perpendicular
+        # chord vector); evaluating the resulting quadratic Bezier at its
+        # true parametric midpoint (t=0.5: 0.25*P0 + 0.5*P1 + 0.25*P2)
+        # gives the exact point on the rendered arc, in data coordinates,
+        # with no dependence on a draw() call or a pixel/data transform.
+        dx, dy = x2 - x1, y2 - y1
+        cx, cy = (x1 + x2) / 2 + rad * dy, (y1 + y2) / 2 - rad * dx
+        mx = 0.25 * x1 + 0.5 * cx + 0.25 * x2
+        my = 0.25 * y1 + 0.5 * cy + 0.25 * y2
+        ax.text(mx, my, str(count), fontsize=9, ha="center",
+                color="#C44E52" if is_multi_hop else "#333333",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.9))
+
+    for node, (x, y) in positions.items():
+        ax.scatter([x], [y], s=2800, color="#EDEDED", edgecolors="#555555", zorder=3)
+        ax.text(x, y, node.replace("_", "\n"), fontsize=8, ha="center", va="center", zorder=4)
+
+    has_multi_hop = any(abs(positions[b][0] - positions[a][0]) > ONE_HOP_SPAN for a, b in dfg)
+    xs = [x for x, _ in positions.values()]
+    ys = [y for _, y in positions.values()]
+    ax.set_title("Process map (directly-follows graph) -- edges labeled by transition frequency")
+    if has_multi_hop:
+        ax.text(0.5, -0.02, "red = skipped an expected intermediate activity",
+                transform=ax.transAxes, fontsize=8, ha="center", color="#C44E52")
+    ax.set_xlim(min(xs) - 0.8, max(xs) + 0.8)
+    ax.set_ylim(min(ys) - 0.55, max(ys) + 0.4)
+    ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
 
 
 def render_chart(report: dict, out_path: Path) -> None:
@@ -410,11 +569,16 @@ def render_chart(report: dict, out_path: Path) -> None:
     plt.close(fig)
 
 
-def render_markdown(report: dict, chart_path: str | None) -> str:
+def render_markdown(report: dict, chart_path: str | None, process_map_path: str | None = None) -> str:
     lines = [
         "# ReqFlow Process Intelligence -- Proof-of-Value Summary",
         "",
         f"Scope: {report['total']} requisitions currently in the system.",
+    ]
+    if process_map_path:
+        lines += ["", "## Process map", "",
+                  f"![Process map (directly-follows graph)]({process_map_path})"]
+    lines += [
         "",
         "## Variants (actual activity sequences)",
         "",
@@ -452,6 +616,15 @@ def render_markdown(report: dict, chart_path: str | None) -> str:
             lines.append(f"| {reviewer} | {count} |")
         lines += ["", "*Human name or `agent:claude-triage-v1` -- a cheap organizational-mining "
                       "cut (who's deciding what) over a field (`decidedBy`) the API already carries.*"]
+
+    if report["department_cycle_time"]:
+        lines += ["", "## Avg total cycle time by department", "",
+                  "| Department | Cases | Avg total |", "|---|---:|---:|"]
+        for dept, (count, avg) in sorted(report["department_cycle_time"].items(), key=lambda kv: -kv[1][1]):
+            lines.append(f"| {dept} | {count} | {_fmt_minutes(avg)} |")
+        lines += ["", "*Illustrative only at this sample size -- a real engagement would need "
+                      "far more cases per department before reading a difference as a finding "
+                      "rather than noise.*"]
 
     lines += ["", "## Conformance check",
               "",
@@ -507,9 +680,12 @@ def main() -> int:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--out", help="Write a Markdown report to this path")
     parser.add_argument("--chart", help="Write a PNG chart to this path (requires --out)")
+    parser.add_argument("--process-map", help="Write a directly-follows-graph PNG to this path (requires --out)")
     args = parser.parse_args()
     if args.chart and not args.out:
         parser.error("--chart requires --out (the chart is only referenced from the report)")
+    if args.process_map and not args.out:
+        parser.error("--process-map requires --out (the image is only referenced from the report)")
 
     requisitions = fetch_requisitions(args.base_url)
     report = build_report(requisitions)
@@ -520,7 +696,11 @@ def main() -> int:
         if args.chart:
             render_chart(report, Path(args.chart))
             chart_rel = Path(args.chart).name
-        Path(args.out).write_text(render_markdown(report, chart_rel), encoding="utf-8")
+        process_map_rel = None
+        if args.process_map:
+            render_process_map(build_dfg(requisitions), Path(args.process_map))
+            process_map_rel = Path(args.process_map).name
+        Path(args.out).write_text(render_markdown(report, chart_rel, process_map_rel), encoding="utf-8")
         print(f"\nWrote report to {args.out}")
 
     return 0

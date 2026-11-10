@@ -1,8 +1,12 @@
 # ReqFlow Process Intelligence -- Proof-of-Value Summary
 
-> Sample output from a small local demo run (7 hand-created requisitions, including one deliberately approved via a direct API call that skips the expected `/open` step, specifically so the conformance check below has a real deviation to catch rather than reporting a clean pass that's never actually been tested), checked in to show the report's shape -- variants, the queue/decision split, the reviewer breakdown, and conformance. Run against real usage, the same fields populate at whatever volume and cadence the process actually runs at, and the at-scale projection below shows how the same rate reads at a disclosed, hypothetical production volume.
+> Sample output from a small local demo run (7 hand-created requisitions, including one deliberately approved via a direct API call that skips the expected `/open` step, specifically so the conformance check below has a real deviation to catch rather than reporting a clean pass that's never actually been tested), checked in to show the report's shape -- the process map, variants, the queue/decision split, the reviewer breakdown, department cut, and conformance. Run against real usage, the same fields populate at whatever volume and cadence the process actually runs at, and the at-scale projection below shows how the same rate reads at a disclosed, hypothetical production volume.
 
 Scope: 7 requisitions currently in the system.
+
+## Process map
+
+![Process map (directly-follows graph)](sample_process_map.png)
 
 ## Variants (actual activity sequences)
 
@@ -24,7 +28,7 @@ Scope: 7 requisitions currently in the system.
 | Budget headroom insufficient or untracked | 1 |
 | Amount over auto-approval ceiling | 1 |
 
-*1 case(s) still awaiting a decision; average age 12.8 min.*
+*1 case(s) still awaiting a decision; average age 23.7 min.*
 
 ## Decisions by reviewer
 
@@ -35,6 +39,16 @@ Scope: 7 requisitions currently in the system.
 | direct-test-reviewer | 1 |
 
 *Human name or `agent:claude-triage-v1` -- a cheap organizational-mining cut (who's deciding what) over a field (`decidedBy`) the API already carries.*
+
+## Avg total cycle time by department
+
+| Department | Cases | Avg total |
+|---|---:|---:|
+| Operations | 1 | 0.4 min |
+| Facilities | 3 | 0.2 min |
+| Engineering | 2 | 0.0 min |
+
+*Illustrative only at this sample size -- a real engagement would need far more cases per department before reading a difference as a finding rather than noise.*
 
 ## Conformance check
 

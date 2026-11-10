@@ -20,6 +20,7 @@ import unittest
 from datetime import datetime, timezone
 
 from process_intelligence import (
+    build_dfg,
     check_conformance,
     classify_flag_reason,
     _sorted_events,
@@ -161,6 +162,56 @@ class ProfileCaseIntegrationTests(unittest.TestCase):
         profile = profile_case(req, datetime.now(timezone.utc))
         self.assertIsNotNone(profile.conformance_issue)
         self.assertIn("bypassed", profile.conformance_issue)
+
+
+class BuildDfgTests(unittest.TestCase):
+    """build_dfg() feeds the process-map visual -- the one place in this
+    script where the 'skipped an activity' bypass case shows up as a
+    distinct edge rather than an entry in a table, so it's worth locking
+    down that it's counted once per occurrence, not once per variant."""
+
+    def test_counts_each_transition_once_per_case(self):
+        requisitions = [
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("AUTO_APPROVED", "2026-01-01T00:00:01Z")]},
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("AUTO_APPROVED", "2026-01-01T00:00:01Z")]},
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("FLAGGED_FOR_REVIEW", "2026-01-01T00:00:01Z")]},
+        ]
+        dfg = build_dfg(requisitions)
+        self.assertEqual(dfg[("SUBMITTED", "AUTO_APPROVED")], 2)
+        self.assertEqual(dfg[("SUBMITTED", "FLAGGED_FOR_REVIEW")], 1)
+
+    def test_transition_shared_across_different_variants_is_counted_in_full(self):
+        # SUBMITTED -> FLAGGED_FOR_REVIEW appears in every variant that
+        # ever gets flagged, however it's decided afterwards -- the edge
+        # count must reflect every occurrence, not be capped at one
+        # distinct variant's worth.
+        requisitions = [
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("FLAGGED_FOR_REVIEW", "2026-01-01T00:00:01Z"),
+                        _event("OPENED_FOR_REVIEW", "2026-01-01T00:05:00Z"),
+                        _event("APPROVED", "2026-01-01T00:06:00Z")]},
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("FLAGGED_FOR_REVIEW", "2026-01-01T00:00:01Z"),
+                        _event("OPENED_FOR_REVIEW", "2026-01-01T00:05:00Z"),
+                        _event("REJECTED", "2026-01-01T00:06:00Z")]},
+            {"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z"),
+                        _event("FLAGGED_FOR_REVIEW", "2026-01-01T00:00:01Z"),
+                        _event("APPROVED", "2026-01-01T00:00:02Z")]},  # bypass case
+        ]
+        dfg = build_dfg(requisitions)
+        self.assertEqual(dfg[("SUBMITTED", "FLAGGED_FOR_REVIEW")], 3)
+        self.assertEqual(dfg[("FLAGGED_FOR_REVIEW", "OPENED_FOR_REVIEW")], 2)
+        self.assertEqual(dfg[("FLAGGED_FOR_REVIEW", "APPROVED")], 1)
+
+    def test_empty_requisition_list_yields_empty_graph(self):
+        self.assertEqual(build_dfg([]), {})
+
+    def test_single_event_case_contributes_no_edges(self):
+        requisitions = [{"events": [_event("SUBMITTED", "2026-01-01T00:00:00Z")]}]
+        self.assertEqual(build_dfg(requisitions), {})
 
 
 if __name__ == "__main__":

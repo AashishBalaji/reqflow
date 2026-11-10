@@ -174,9 +174,17 @@ after a first discovery pass over their data:
   still deviates from the expected process, which is exactly what
   conformance checking means in process mining: checking a log against an
   expected model, not just describing what happened.
-- **Decisions by reviewer** -- a one-line organizational-mining cut (who's
-  deciding what) over the `decidedBy` field every requisition already
-  carries.
+- **Decisions by reviewer** and **cycle time by department** -- two cheap
+  cuts over fields every requisition already carries (`decidedBy`,
+  `department`), the first a nod to organizational mining, the second
+  explicitly labeled illustrative-only at this sample size rather than
+  implied to be a finding.
+- **A process map** -- a directly-follows graph (nodes = activities,
+  edges = observed transitions, weighted and labeled by frequency, with a
+  skipped-activity case like the conformance deviation above rendered in
+  red so it can't be missed) -- the standard first visual in process
+  mining, and the one a value engineer actually opens first in a
+  discovery workshop.
 
 It's a REST client, nothing more -- same relationship to the API that the
 triage agent has. No new endpoint was added for this script specifically;
@@ -184,9 +192,9 @@ it just reads the event log the API already returns on every requisition.
 
 ```bash
 cd analytics
-pip install -r requirements.txt   # only needed for --chart
+pip install -r requirements.txt   # only needed for --chart/--process-map
 python process_intelligence.py                                    # console report
-python process_intelligence.py --out report.md --chart chart.png  # + files
+python process_intelligence.py --out report.md --chart chart.png --process-map map.png
 python -m unittest test_process_intelligence.py -v                # unit tests
 ```
 
@@ -197,8 +205,9 @@ earlier probe order classified every vendor-risk flag as an amount-ceiling
 flag, because both messages contain the word "ceiling" -- caught by
 review, not by a test, because there wasn't one yet. There is now.
 
-`sample_report.md` / `sample_chart.png` are checked-in output from a small
-local demo run, so the report's shape is visible without running anything.
+`sample_report.md` / `sample_chart.png` / `sample_process_map.png` are
+checked-in output from a small local demo run, so the report's shape is
+visible without running anything.
 
 ## Running it
 

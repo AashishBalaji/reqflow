@@ -2,7 +2,7 @@ package com.reqflow.controller;
 
 import com.reqflow.dto.CreateRequisitionRequest;
 import com.reqflow.dto.DecisionRequest;
-import com.reqflow.model.PurchaseRequisition;
+import com.reqflow.dto.RequisitionResponse;
 import com.reqflow.model.RequisitionStatus;
 import com.reqflow.service.RequisitionService;
 import jakarta.validation.Valid;
@@ -18,7 +18,8 @@ import java.util.List;
  * (agent/triage_agent.py) calls as function-calling tools -- there is no
  * separate "agent API"; the agent is just another caller of this REST
  * surface, which is the point of modeling it as tool-use rather than a
- * bespoke integration.
+ * bespoke integration. All three POST endpoints require HTTP Basic auth
+ * (SecurityConfig); GET stays open for browsing.
  */
 @RestController
 @RequestMapping("/api/requisitions")
@@ -32,27 +33,28 @@ public class RequisitionController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public PurchaseRequisition create(@Valid @RequestBody CreateRequisitionRequest request) {
-        return requisitionService.create(request);
+    public RequisitionResponse create(@Valid @RequestBody CreateRequisitionRequest request) {
+        return RequisitionResponse.from(requisitionService.create(request));
     }
 
     @GetMapping
-    public List<PurchaseRequisition> findAll(@RequestParam(required = false) RequisitionStatus status) {
-        return status == null ? requisitionService.findAll() : requisitionService.findByStatus(status);
+    public List<RequisitionResponse> findAll(@RequestParam(required = false) RequisitionStatus status) {
+        var requisitions = status == null ? requisitionService.findAll() : requisitionService.findByStatus(status);
+        return requisitions.stream().map(RequisitionResponse::from).toList();
     }
 
     @GetMapping("/{id}")
-    public PurchaseRequisition findById(@PathVariable Long id) {
-        return requisitionService.findById(id);
+    public RequisitionResponse findById(@PathVariable Long id) {
+        return RequisitionResponse.from(requisitionService.findById(id));
     }
 
     @PostMapping("/{id}/approve")
-    public PurchaseRequisition approve(@PathVariable Long id, @Valid @RequestBody DecisionRequest request) {
-        return requisitionService.approve(id, request.decidedBy(), request.reason());
+    public RequisitionResponse approve(@PathVariable Long id, @Valid @RequestBody DecisionRequest request) {
+        return RequisitionResponse.from(requisitionService.approve(id, request.decidedBy(), request.reason()));
     }
 
     @PostMapping("/{id}/reject")
-    public PurchaseRequisition reject(@PathVariable Long id, @Valid @RequestBody DecisionRequest request) {
-        return requisitionService.reject(id, request.decidedBy(), request.reason());
+    public RequisitionResponse reject(@PathVariable Long id, @Valid @RequestBody DecisionRequest request) {
+        return RequisitionResponse.from(requisitionService.reject(id, request.decidedBy(), request.reason()));
     }
 }

@@ -1,7 +1,7 @@
 package com.reqflow.controller;
 
 import com.reqflow.dto.CreateVendorRequest;
-import com.reqflow.model.Vendor;
+import com.reqflow.dto.VendorResponse;
 import com.reqflow.service.VendorService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -21,17 +21,17 @@ public class VendorController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public Vendor create(@Valid @RequestBody CreateVendorRequest request) {
-        return vendorService.create(request);
+    public VendorResponse create(@Valid @RequestBody CreateVendorRequest request) {
+        return VendorResponse.from(vendorService.create(request));
     }
 
     @GetMapping
-    public List<Vendor> findAll() {
-        return vendorService.findAll();
+    public List<VendorResponse> findAll() {
+        return vendorService.findAll().stream().map(VendorResponse::from).toList();
     }
 
     @GetMapping("/{id}")
-    public Vendor findById(@PathVariable Long id) {
-        return vendorService.findById(id);
+    public VendorResponse findById(@PathVariable Long id) {
+        return VendorResponse.from(vendorService.findById(id));
     }
 }

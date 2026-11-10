@@ -1,7 +1,7 @@
 package com.reqflow.controller;
 
+import com.reqflow.dto.BudgetLineResponse;
 import com.reqflow.dto.CreateBudgetLineRequest;
-import com.reqflow.model.BudgetLine;
 import com.reqflow.service.BudgetLineService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
@@ -21,17 +21,17 @@ public class BudgetLineController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public BudgetLine create(@Valid @RequestBody CreateBudgetLineRequest request) {
-        return budgetLineService.create(request);
+    public BudgetLineResponse create(@Valid @RequestBody CreateBudgetLineRequest request) {
+        return BudgetLineResponse.from(budgetLineService.create(request));
     }
 
     @GetMapping
-    public List<BudgetLine> findAll() {
-        return budgetLineService.findAll();
+    public List<BudgetLineResponse> findAll() {
+        return budgetLineService.findAll().stream().map(BudgetLineResponse::from).toList();
     }
 
     @GetMapping("/{id}")
-    public BudgetLine findById(@PathVariable Long id) {
-        return budgetLineService.findById(id);
+    public BudgetLineResponse findById(@PathVariable Long id) {
+        return BudgetLineResponse.from(budgetLineService.findById(id));
     }
 }
